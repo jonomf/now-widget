@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Now</string>
+    <string name="widget_desc">One tap to say what you\'re doing now</string>
+</resources>

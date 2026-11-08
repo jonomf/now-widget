@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A bigger activity button, for the expand panel. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/slot_root"
+    android:layout_width="0dp"
+    android:layout_height="match_parent"
+    android:layout_margin="3dp"
+    android:layout_weight="1"
+    android:background="@drawable/slot_off"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:paddingStart="2dp"
+    android:paddingEnd="2dp">
+
+    <TextView
+        android:id="@+id/slot_emoji"
+        style="@style/SlotEmoji"
+        android:textSize="24sp" />
+
+    <TextView
+        android:id="@+id/slot_label"
+        style="@style/SlotLabel"
+        android:layout_marginTop="2dp"
+        android:textSize="11sp" />
+</LinearLayout>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A person. Tap to mark that you're with them right now. -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/chip"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_marginStart="2dp"
+    android:layout_marginEnd="2dp"
+    android:background="@drawable/slot_off"
+    android:ellipsize="end"
+    android:includeFontPadding="false"
+    android:maxWidth="84dp"
+    android:paddingStart="7dp"
+    android:paddingTop="4dp"
+    android:paddingEnd="7dp"
+    android:paddingBottom="4dp"
+    android:singleLine="true"
+    android:textColor="@color/widget_text"
+    android:textSize="12sp" />
