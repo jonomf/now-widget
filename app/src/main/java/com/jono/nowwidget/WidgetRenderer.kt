@@ -142,6 +142,7 @@ object WidgetRenderer {
 
         if (k.layout == R.layout.widget_strip) {
             rv.setViewLayoutWidth(R.id.head, k.headDp, TypedValue.COMPLEX_UNIT_DIP)
+            rv.removeAllViews(R.id.slots)
             Store.picks(s.buttons, s.act, k.cols, s.scores, s.smart).forEach { a ->
                 rv.addView(R.id.slots, slot(ctx, R.layout.slot, a, a.id == s.act?.id))
             }
@@ -217,6 +218,8 @@ object WidgetRenderer {
         cols: Int,
         rows: Int,
     ) {
+        // Android can reapply an update onto the views already showing, so always clear first.
+        rv.removeAllViews(container)
         val picks = Store.picks(s.buttons, s.act, cols * rows, s.scores, s.smart)
         picks.chunked(cols).forEach { chunk ->
             val row = RemoteViews(ctx.packageName, rowLayout)
@@ -240,6 +243,7 @@ object WidgetRenderer {
     }
 
     fun people(ctx: Context, rv: RemoteViews, container: Int, s: Snapshot, max: Int, names: Boolean) {
+        rv.removeAllViews(container)
         if (s.people.isEmpty() || s.cur == null || max <= 0) return
         rv.setViewVisibility(container, View.VISIBLE)
         // People you're with stay visible even if there are more people than room.
@@ -260,6 +264,7 @@ object WidgetRenderer {
     }
 
     private fun breakdown(ctx: Context, rv: RemoteViews, s: Snapshot, lines: Int) {
+        rv.removeAllViews(R.id.breakdown)
         if (s.today.isEmpty()) return
         rv.setViewVisibility(R.id.breakdown, View.VISIBLE)
         s.today.take(lines).forEach { (a, ms) ->
