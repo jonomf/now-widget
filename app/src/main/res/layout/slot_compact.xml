@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A smaller activity button, so two rows fit in a widget that's one row tall. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/slot_root"
+    android:layout_width="0dp"
+    android:layout_height="match_parent"
+    android:layout_margin="1dp"
+    android:layout_weight="1"
+    android:background="@drawable/slot_off"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:paddingStart="1dp"
+    android:paddingEnd="1dp">
+
+    <TextView
+        android:id="@+id/slot_emoji"
+        style="@style/SlotEmoji"
+        android:textSize="15sp" />
+
+    <TextView
+        android:id="@+id/slot_label"
+        style="@style/SlotLabel"
+        android:textSize="9sp" />
+</LinearLayout>

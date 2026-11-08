@@ -1,12 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- One row tall: what you're doing, then buttons. The renderer sets the head's width. -->
+<!-- One row tall: what you're doing, then two rows of buttons. The renderer sets the head's width. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/widget_bg"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:padding="4dp">
+    android:paddingStart="4dp"
+    android:paddingTop="2dp"
+    android:paddingEnd="4dp"
+    android:paddingBottom="2dp">
 
     <LinearLayout
         android:id="@+id/head"
@@ -48,5 +51,5 @@
         android:layout_width="0dp"
         android:layout_height="match_parent"
         android:layout_weight="1"
-        android:orientation="horizontal" />
+        android:orientation="vertical" />
 </LinearLayout>

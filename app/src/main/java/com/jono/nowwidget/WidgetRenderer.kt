@@ -53,9 +53,9 @@ object WidgetRenderer {
         val expands: Boolean = true,
     ) {
         TILE(R.layout.widget_tile, SizeF(50f, 50f), "now only"),
-        STRIP_S(R.layout.widget_strip, SizeF(150f, 50f), "now + 2 buttons", cols = 2, rows = 1, headDp = 92f),
-        STRIP(R.layout.widget_strip, SizeF(220f, 50f), "now + 4 buttons", cols = 4, rows = 1, headDp = 108f),
-        STRIP_L(R.layout.widget_strip, SizeF(320f, 50f), "now + 6 buttons", cols = 6, rows = 1, headDp = 122f),
+        STRIP_S(R.layout.widget_strip, SizeF(150f, 50f), "now + 4 buttons", cols = 2, rows = 2, headDp = 92f),
+        STRIP(R.layout.widget_strip, SizeF(220f, 50f), "now + 8 buttons", cols = 4, rows = 2, headDp = 108f),
+        STRIP_L(R.layout.widget_strip, SizeF(320f, 50f), "now + 12 buttons", cols = 6, rows = 2, headDp = 122f),
         SQUARE(R.layout.widget_block, SizeF(150f, 150f), "now, split, 6 buttons", cols = 3, rows = 2),
         LARGE(R.layout.widget_block, SizeF(220f, 150f), "now, split, people, 10 buttons",
             cols = 5, rows = 2, peopleMode = PEOPLE_INLINE, peopleMax = 3),
@@ -142,10 +142,7 @@ object WidgetRenderer {
 
         if (k.layout == R.layout.widget_strip) {
             rv.setViewLayoutWidth(R.id.head, k.headDp, TypedValue.COMPLEX_UNIT_DIP)
-            rv.removeAllViews(R.id.slots)
-            Store.picks(s.buttons, s.act, k.cols, s.scores, s.smart).forEach { a ->
-                rv.addView(R.id.slots, slot(ctx, R.layout.slot, a, a.id == s.act?.id))
-            }
+            grid(ctx, rv, R.id.slots, R.layout.row, R.layout.slot_compact, s, k.cols, k.rows)
         }
         if (isBlock) {
             bar(rv, barBmp)
