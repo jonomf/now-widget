@@ -53,7 +53,7 @@ object WidgetRenderer {
         val expands: Boolean = true,
     ) {
         TILE(R.layout.widget_tile, SizeF(50f, 50f), "now only"),
-        STRIP_S(R.layout.widget_strip, SizeF(150f, 50f), "now + 4 buttons", cols = 2, rows = 2, headDp = 92f),
+        STRIP_S(R.layout.widget_strip, SizeF(150f, 50f), "now + 4 buttons", cols = 2, rows = 2, headDp = 96f),
         STRIP(R.layout.widget_strip, SizeF(220f, 50f), "now + 8 buttons", cols = 4, rows = 2, headDp = 108f),
         STRIP_L(R.layout.widget_strip, SizeF(320f, 50f), "now + 12 buttons", cols = 6, rows = 2, headDp = 122f),
         SQUARE(R.layout.widget_block, SizeF(150f, 150f), "now, split, 6 buttons", cols = 3, rows = 2),
@@ -168,6 +168,19 @@ object WidgetRenderer {
             rv.setViewVisibility(R.id.cur_elapsed, View.GONE)
         }
         if (showSince) rv.setTextViewText(R.id.cur_since, sinceLine(s, withTotal))
+
+        // The note button lights up once the current activity has a note.
+        rv.setInt(R.id.btn_note, "setBackgroundResource",
+            if (cur != null && cur.note.isNotBlank()) R.drawable.slot_on else R.drawable.slot_off)
+        rv.setOnClickPendingIntent(R.id.btn_note, openNote(ctx))
+
+        val updater = if (UpdateStatus.available(ctx)) UpdateStatus.updaterIntent(ctx) else null
+        rv.setViewVisibility(R.id.update_symbol, if (updater != null) View.VISIBLE else View.GONE)
+        if (updater != null) {
+            rv.setOnClickPendingIntent(R.id.update_symbol, PendingIntent.getActivity(
+                ctx, 4, updater, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            ))
+        }
     }
 
     /** Most changeable first, so a narrow widget clips the least useful part. */
@@ -282,6 +295,12 @@ object WidgetRenderer {
     private fun openPanel(ctx: Context): PendingIntent = PendingIntent.getActivity(
         ctx, 2,
         Intent(ctx, PanelActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    private fun openNote(ctx: Context): PendingIntent = PendingIntent.getActivity(
+        ctx, 3,
+        Intent(ctx, NoteActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 

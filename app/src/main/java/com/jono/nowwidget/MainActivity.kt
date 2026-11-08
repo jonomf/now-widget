@@ -30,6 +30,7 @@ class MainActivity : Activity() {
     private lateinit var lockCountButton: Button
     private lateinit var sizes: TextView
     private lateinit var updateStatus: TextView
+    private lateinit var updaterButton: Button
     private var periodDays = 1
     private val redraw: () -> Unit = { runOnUiThread { refresh() } }
 
@@ -133,7 +134,14 @@ class MainActivity : Activity() {
             setPadding(0, 0, 0, dp(8))
         }
         col.addView(updateStatus)
-        col.addView(button("Get the latest build") {
+        updaterButton = button("") {
+            startActivity(
+                UpdateStatus.updaterIntent(this)
+                    ?: Intent(Intent.ACTION_VIEW, Uri.parse(UpdateStatus.UPDATER_RELEASES))
+            )
+        }
+        col.addView(updaterButton)
+        col.addView(button("Get the latest build in the browser") {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(RELEASES_URL)))
         })
 
@@ -174,8 +182,19 @@ class MainActivity : Activity() {
         stepButton.text = "Tapping the current one again: back ${Prefs.stepMinutes(this)} min"
         lockCountButton.text = "Lock screen buttons: ${Prefs.lockButtons(this)}"
         sizes.text = WidgetRenderer.describeSizes(this)
-        val build = packageManager.getPackageInfo(packageName, 0).longVersionCode
-        updateStatus.text = "You're on build $build. Download a newer build and open it to install over this one."
+        val build = UpdateStatus.currentBuild(this)
+        val latest = UpdateStatus.latest(this)
+        val hasUpdater = UpdateStatus.updaterIntent(this) != null
+        updateStatus.text = when {
+            !hasUpdater -> "You're on build $build. Install Widget Updater to get an update symbol on the widget."
+            latest > build -> "Build $latest is available (you're on $build)."
+            else -> "You're on build $build. The widget shows a small ↑ when there's a new build."
+        }
+        updaterButton.text = when {
+            !hasUpdater -> "Get Widget Updater"
+            latest > build -> "Update now"
+            else -> "Open Widget Updater"
+        }
         periodButtons.forEachIndexed { i, b -> b.alpha = if (listOf(1, 7, 30)[i] == periodDays) 1f else 0.55f }
         drawStats(s.now)
     }

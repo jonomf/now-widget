@@ -1,27 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 1×1: what you're doing and for how long. Tap to change it. -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/head"
+<!-- 1×1: what you're doing and for how long. Tap to change it; the corner button adds a note. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@drawable/widget_bg"
-    android:gravity="center"
-    android:orientation="vertical"
-    android:padding="4dp">
+    android:background="@drawable/widget_bg">
+
+    <LinearLayout
+        android:id="@+id/head"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="4dp">
+
+        <TextView
+            android:id="@+id/cur_emoji"
+            style="@style/CurEmoji" />
+
+        <Chronometer
+            android:id="@+id/cur_elapsed"
+            style="@style/Elapsed"
+            android:layout_marginTop="2dp" />
+
+        <TextView
+            android:id="@+id/cur_name"
+            style="@style/CurName"
+            android:layout_marginTop="1dp"
+            android:gravity="center_horizontal"
+            android:textSize="11sp" />
+    </LinearLayout>
 
     <TextView
-        android:id="@+id/cur_emoji"
-        style="@style/CurEmoji" />
-
-    <Chronometer
-        android:id="@+id/cur_elapsed"
-        style="@style/Elapsed"
-        android:layout_marginTop="2dp" />
-
-    <TextView
-        android:id="@+id/cur_name"
-        style="@style/CurName"
-        android:layout_marginTop="1dp"
-        android:gravity="center_horizontal"
+        android:id="@+id/btn_note"
+        style="@style/NoteButton"
+        android:layout_width="22dp"
+        android:layout_height="22dp"
+        android:layout_gravity="top|end"
+        android:layout_margin="3dp"
         android:textSize="11sp" />
-</LinearLayout>
+
+    <ImageView
+        android:id="@+id/update_symbol"
+        style="@style/UpdateSymbol"
+        android:layout_gravity="top|start"
+        android:layout_margin="3dp" />
+</FrameLayout>

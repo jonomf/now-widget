@@ -6,6 +6,11 @@
     <!-- Puts that notification back after the phone restarts. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- The Widget Updater, which checks for new builds and installs them. -->
+    <queries>
+        <package android:name="com.jono.widgetupdater" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
@@ -37,6 +42,30 @@
             android:launchMode="singleTask"
             android:taskAffinity=""
             android:theme="@style/Panel" />
+
+        <!-- The note box. The keyboard's mic does the voice typing, so this app needs no mic access. -->
+        <activity
+            android:name=".NoteActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/Panel" />
+
+        <!-- Lets the Widget Updater find this app and tell it when a new build is out. -->
+        <receiver
+            android:name=".UpdateStatusReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.jono.widgets.UPDATABLE" />
+            </intent-filter>
+            <meta-data
+                android:name="com.jono.widgets.repo"
+                android:value="jonomf/now-widget" />
+            <meta-data
+                android:name="com.jono.widgets.asset"
+                android:value="now-widget.apk" />
+        </receiver>
 
         <receiver
             android:name=".NowWidget"

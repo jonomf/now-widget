@@ -8,5 +8,6 @@ Install from [the latest release](https://github.com/jonomf/now-widget/releases/
 - Tap the wrong one? Tap the right one within a minute and the mistake is replaced.
 - Forgot to tap? Tap the current activity again to move its start back (15 minutes by default).
 - Larger widgets and the expanded notification let you mark who you're with.
+- The 📝 button adds a note to what you're doing now. Use the keyboard's mic to dictate it.
 
 Everything stays on the phone. The app has no internet permission. Export to CSV from the app.

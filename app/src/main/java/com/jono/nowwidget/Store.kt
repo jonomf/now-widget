@@ -255,7 +255,8 @@ object Store {
             moveBack(ctx, cur, Prefs.stepMinutes(ctx) * 60_000L)
             return
         }
-        if (now - cur.start < GRACE_MS) {
+        // An entry you've already added a note to wasn't a mis-tap, so it's never replaced.
+        if (now - cur.start < GRACE_MS && cur.note.isBlank()) {
             val prev = before(ctx, cur)
             deleteEntry(ctx, cur.id)
             if (prev?.activityId != activityId) insert(ctx, activityId, cur.start)
@@ -288,6 +289,14 @@ object Store {
                 put("person_id", personId)
             })
         }
+    }
+
+    /** Adds to whatever notes the entry already has, one per line. */
+    fun appendNote(ctx: Context, entryId: Long, text: String) {
+        db(ctx).execSQL(
+            "UPDATE entry SET note = CASE WHEN note = '' THEN ? ELSE note || char(10) || ? END WHERE id = ?",
+            arrayOf<Any>(text, text, entryId),
+        )
     }
 
     fun addEntry(ctx: Context, activityId: Long, start: Long, note: String, people: Set<Long>) {
