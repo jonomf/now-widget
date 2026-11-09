@@ -26,7 +26,7 @@ object Notifier {
         if (!nm.areNotificationsEnabled()) return
         ensureChannel(nm)
 
-        val title = s.act?.let { it.emoji + " " + it.name } ?: "What's up now?"
+        val title = s.act?.let { it.emoji + " " + it.name } ?: "Nothing right now"
         val b = Notification.Builder(ctx, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(title)
@@ -41,9 +41,9 @@ object Notifier {
             .setCustomContentView(collapsed(ctx, s))
             .setCustomBigContentView(expanded(ctx, s))
 
-        val cur = s.cur
-        if (cur != null) {
-            b.setWhen(cur.start).setShowWhen(true).setUsesChronometer(true)
+        val since = s.cur?.start ?: s.idleSince
+        if (since != null) {
+            b.setWhen(since).setShowWhen(true).setUsesChronometer(true)
         } else {
             b.setShowWhen(false)
         }

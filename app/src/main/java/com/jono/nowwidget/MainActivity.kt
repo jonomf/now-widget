@@ -81,7 +81,7 @@ class MainActivity : Activity() {
             note("Tap a different activity to switch. Switched by mistake? Tap the right one within a minute and the mistake disappears.")
         )
         stepButton = button("") {
-            val options = listOf(5, 10, 15, 30)
+            val options = listOf(0, 5, 10, 15, 30)
             val next = options[(options.indexOf(Prefs.stepMinutes(this)) + 1) % options.size]
             Prefs.setStepMinutes(this, next)
             refresh()
@@ -178,8 +178,9 @@ class MainActivity : Activity() {
         val s = WidgetRenderer.snapshot(this)
         nowLine.text = s.act?.let { a ->
             a.emoji + " " + a.name + "  " + Fmt.dur(s.now - (s.cur?.start ?: s.now))
-        } ?: "Nothing logged yet"
-        stepButton.text = "Tapping the current one again: back ${Prefs.stepMinutes(this)} min"
+        } ?: "Nothing right now"
+        val step = Prefs.stepMinutes(this)
+        stepButton.text = "Tapping the current one again: " + if (step == 0) "turn it off" else "back $step min"
         lockCountButton.text = "Lock screen buttons: ${Prefs.lockButtons(this)}"
         sizes.text = WidgetRenderer.describeSizes(this)
         val build = UpdateStatus.currentBuild(this)

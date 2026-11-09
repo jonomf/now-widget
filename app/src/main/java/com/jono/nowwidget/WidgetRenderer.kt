@@ -27,6 +27,7 @@ class Snapshot(
     val today: List<Pair<Act, Long>>,
     val todayTotal: Long,
     val sinceText: String,
+    val idleSince: Long?,
 )
 
 object WidgetRenderer {
@@ -96,6 +97,7 @@ object WidgetRenderer {
         val acts = Store.allActs(ctx)
         val byId = acts.associateBy { it.id }
         val cur = Store.current(ctx)
+        val idle = Store.idleSince(ctx)
         val spans = Store.spans(ctx, Fmt.startOfDay(now), now)
         val totals = HashMap<Long, Long>()
         spans.forEach { totals[it.entry.activityId] = (totals[it.entry.activityId] ?: 0L) + it.ms }
@@ -112,7 +114,8 @@ object WidgetRenderer {
             smart = Prefs.smartOrder(ctx),
             today = today,
             todayTotal = today.sumOf { it.second },
-            sinceText = cur?.let { Fmt.since(ctx, it.start) } ?: "",
+            sinceText = (cur?.start ?: idle)?.let { Fmt.since(ctx, it) } ?: "",
+            idleSince = idle,
         )
     }
 
@@ -159,11 +162,15 @@ object WidgetRenderer {
     private fun head(ctx: Context, rv: RemoteViews, s: Snapshot, showSince: Boolean, withTotal: Boolean) {
         val cur = s.cur
         val act = s.act
-        rv.setTextViewText(R.id.cur_emoji, act?.emoji ?: "👆")
-        rv.setTextViewText(R.id.cur_name, act?.name ?: "What's up now?")
-        if (cur != null) {
+        // A soft glow whenever nothing is on, as a nudge to pick something.
+        rv.setInt(R.id.root, "setBackgroundResource",
+            if (cur == null) R.drawable.widget_bg_idle else R.drawable.widget_bg)
+        rv.setTextViewText(R.id.cur_emoji, act?.emoji ?: "⭕")
+        rv.setTextViewText(R.id.cur_name, act?.name ?: "Nothing")
+        val since = cur?.start ?: s.idleSince
+        if (since != null) {
             rv.setViewVisibility(R.id.cur_elapsed, View.VISIBLE)
-            rv.setChronometer(R.id.cur_elapsed, SystemClock.elapsedRealtime() - (s.now - cur.start), null, true)
+            rv.setChronometer(R.id.cur_elapsed, SystemClock.elapsedRealtime() - (s.now - since), null, true)
         } else {
             rv.setViewVisibility(R.id.cur_elapsed, View.GONE)
         }
@@ -185,7 +192,7 @@ object WidgetRenderer {
 
     /** Most changeable first, so a narrow widget clips the least useful part. */
     private fun sinceLine(s: Snapshot, withTotal: Boolean): String {
-        if (s.cur == null) return "Tap a button to start"
+        if (s.cur == null) return s.sinceText.ifBlank { "Tap a button to start" }
         val parts = ArrayList<String>()
         val names = s.people.filter { it.id in s.cur.people }.map { it.name }
         if (names.isNotEmpty()) parts.add(names.joinToString(", "))

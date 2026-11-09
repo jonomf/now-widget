@@ -104,6 +104,8 @@ private class Helper(ctx: Context) : SQLiteOpenHelper(ctx, "now.db", null, 1) {
 }
 
 object Store {
+    /** An entry with this activity means "doing nothing". It's left out of all stats. */
+    private const val IDLE = 0L
     private const val GRACE_MS = 60_000L
     private const val DOUBLE_TAP_MS = 700L
     private const val DAY_MS = 86_400_000L
@@ -208,7 +210,13 @@ object Store {
 
     // --- The log ---
 
-    fun current(ctx: Context): Entry? {
+    /** What you're doing now; null when nothing is on. */
+    fun current(ctx: Context): Entry? = latest(ctx)?.takeIf { it.activityId != IDLE }
+
+    /** When you turned everything off; null if something is on. */
+    fun idleSince(ctx: Context): Long? = latest(ctx)?.takeIf { it.activityId == IDLE }?.start
+
+    private fun latest(ctx: Context): Entry? {
         val e = db(ctx).rawQuery(
             "SELECT id, activity_id, start_ms, note FROM entry ORDER BY start_ms DESC, id DESC LIMIT 1",
             null,
@@ -238,7 +246,7 @@ object Store {
      * The one thing the buttons do.
      * - A different activity: it starts now, and that ends the last one.
      * - Within a minute of the last switch: that was a mistake, so replace it instead of logging it.
-     * - The current activity again: you forgot to tap, so move its start back.
+     * - The current activity again: turn it off, or move its start back if that's the setting.
      */
     fun tap(ctx: Context, activityId: Long) {
         val now = System.currentTimeMillis()
@@ -246,13 +254,19 @@ object Store {
         lastTapAct = activityId
         lastTapAt = now
 
-        val cur = current(ctx)
+        val cur = latest(ctx)
         if (cur == null) {
             insert(ctx, activityId, now)
             return
         }
         if (cur.activityId == activityId) {
-            moveBack(ctx, cur, Prefs.stepMinutes(ctx) * 60_000L)
+            val step = Prefs.stepMinutes(ctx)
+            when {
+                step > 0 -> moveBack(ctx, cur, step * 60_000L)
+                // Started by mistake a moment ago: undo it, so whatever came before carries on.
+                now - cur.start < GRACE_MS && cur.note.isBlank() -> deleteEntry(ctx, cur.id)
+                else -> insert(ctx, IDLE, now)
+            }
             return
         }
         // An entry you've already added a note to wasn't a mis-tap, so it's never replaced.
@@ -362,7 +376,7 @@ object Store {
             val end = if (i + 1 < rows.size) rows[i + 1].start else limit
             val a = maxOf(from, e.start)
             val b = minOf(end, limit)
-            if (b > a) out.add(Span(e.copy(people = people[e.id] ?: emptySet()), a, b))
+            if (b > a && e.activityId != IDLE) out.add(Span(e.copy(people = people[e.id] ?: emptySet()), a, b))
         }
         return out
     }
@@ -429,8 +443,8 @@ object Prefs {
     fun smartOrder(ctx: Context): Boolean = p(ctx).getBoolean("smart", true)
     fun setSmartOrder(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("smart", on).apply()
 
-    fun stepMinutes(ctx: Context): Int = p(ctx).getInt("step", 15)
-    fun setStepMinutes(ctx: Context, v: Int) = p(ctx).edit().putInt("step", v).apply()
+    fun stepMinutes(ctx: Context): Int = p(ctx).getInt("tap_again", 0)
+    fun setStepMinutes(ctx: Context, v: Int) = p(ctx).edit().putInt("tap_again", v).apply()
 
     fun lockButtons(ctx: Context): Int = p(ctx).getInt("lock_buttons", 5)
     fun setLockButtons(ctx: Context, v: Int) = p(ctx).edit().putInt("lock_buttons", v).apply()
