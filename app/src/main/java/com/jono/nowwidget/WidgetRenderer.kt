@@ -181,6 +181,7 @@ object WidgetRenderer {
             if (cur != null && cur.note.isNotBlank()) R.drawable.slot_on else R.drawable.slot_off)
         rv.setOnClickPendingIntent(R.id.btn_note, openNote(ctx))
 
+        ClaudeLink.bind(ctx, rv, R.id.claude, room = showSince)  // not on the 1×1 tile
         val updater = if (UpdateStatus.available(ctx)) UpdateStatus.updaterIntent(ctx) else null
         rv.setViewVisibility(R.id.update_symbol, if (updater != null) View.VISIBLE else View.GONE)
         if (updater != null) {

@@ -41,6 +41,10 @@
         android:textSize="11sp" />
 
     <ImageView
+        android:id="@+id/claude"
+        style="@style/ClaudeLink" />
+
+    <ImageView
         android:id="@+id/update_symbol"
         style="@style/UpdateSymbol"
         android:layout_gravity="top|start"

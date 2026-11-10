@@ -62,6 +62,10 @@
                     android:layout_weight="1" />
 
                 <ImageView
+                    android:id="@+id/claude"
+                    style="@style/ClaudeLink" />
+
+                <ImageView
                     android:id="@+id/update_symbol"
                     style="@style/UpdateSymbol" />
             </LinearLayout>
