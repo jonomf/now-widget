@@ -2,6 +2,7 @@ package com.jono.nowwidget
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import android.os.Bundle
 import android.text.format.DateFormat
@@ -48,9 +49,12 @@ class TimelineActivity : Activity() {
             text = "◀"
             setOnClickListener { go(-1) }
         })
+        // Tap the date to jump to any day.
         dayLabel = TextView(this).apply {
             textSize = 18f
             gravity = Gravity.CENTER
+            setPadding(0, dp(10), 0, dp(10))
+            setOnClickListener { pickDay() }
         }
         nav.addView(dayLabel, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         nav.addView(Button(this).apply {
@@ -58,6 +62,21 @@ class TimelineActivity : Activity() {
             setOnClickListener { go(1) }
         })
         col.addView(nav)
+
+        val jumps = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        jumps.addView(Button(this).apply {
+            text = "First"
+            setOnClickListener { Store.firstAndLast(this@TimelineActivity)?.let { jump(it.first) } }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        jumps.addView(Button(this).apply {
+            text = "Pick a day"
+            setOnClickListener { pickDay() }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        jumps.addView(Button(this).apply {
+            text = "Today"
+            setOnClickListener { jump(System.currentTimeMillis()) }
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        col.addView(jumps)
 
         ribbon = RibbonView(this)
         col.addView(
@@ -74,6 +93,34 @@ class TimelineActivity : Activity() {
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         col.addView(list)
         setContentView(ScrollView(this).apply { addView(col) })
+
+        val asked = intent.getLongExtra(EXTRA_DAY, -1L)
+        if (asked >= 0L) day = DiaryDay.start(minOf(asked, System.currentTimeMillis()))
+    }
+
+    /** Opens the diary day containing [ms]. */
+    private fun jump(ms: Long) {
+        day = DiaryDay.start(minOf(ms, System.currentTimeMillis()))
+        draw()
+    }
+
+    private fun pickDay() {
+        val c = Calendar.getInstance()
+        c.timeInMillis = day
+        val d = DatePickerDialog(
+            this,
+            { _, y, m, dom ->
+                val pick = Calendar.getInstance()
+                pick.clear()
+                pick.set(y, m, dom, 12, 0, 0)
+                jump(pick.timeInMillis)
+            },
+            c.get(Calendar.YEAR),
+            c.get(Calendar.MONTH),
+            c.get(Calendar.DAY_OF_MONTH),
+        )
+        d.datePicker.maxDate = System.currentTimeMillis()
+        d.show()
     }
 
     override fun onResume() {
@@ -317,5 +364,10 @@ class TimelineActivity : Activity() {
     private fun changed() {
         WidgetRenderer.refresh(this)
         draw()
+    }
+
+    companion object {
+        /** Open on the diary day containing this time (ms). */
+        const val EXTRA_DAY = "day"
     }
 }

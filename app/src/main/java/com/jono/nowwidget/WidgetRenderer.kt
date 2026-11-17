@@ -29,6 +29,9 @@ class Snapshot(
     val places: List<Link>,
     /** Where you are now, if you said. */
     val place: Link?,
+    val contexts: List<Link>,
+    /** What the current activity is part of (a trip, an event); sticky from one entry to the next. */
+    val context: Link?,
     /** The current activity has a note or feeling on it. */
     val curHasMoments: Boolean,
     val scores: Map<Long, Double>,
@@ -64,6 +67,8 @@ object WidgetRenderer {
         /** The head line has room to say where you are. */
         val placeInHead: Boolean = true,
         val placesMax: Int = 0,
+        /** The head line has room to say what context you're in. */
+        val contextInHead: Boolean = false,
     ) {
         TILE(R.layout.widget_tile, SizeF(50f, 50f), "now only", placeInHead = false),
         STRIP_S(R.layout.widget_strip, SizeF(150f, 50f), "now + 4 buttons", cols = 2, rows = 2, headDp = 96f,
@@ -86,7 +91,8 @@ object WidgetRenderer {
         XL(R.layout.widget_block, SizeF(320f, 250f), "now, split, people, 21 buttons, today",
             cols = 7, rows = 3, peopleMode = PEOPLE_INLINE, peopleMax = 6, lines = 3),
         XL_TALL(R.layout.widget_block, SizeF(320f, 340f), "everything",
-            cols = 7, rows = 4, peopleMode = PEOPLE_INLINE, peopleMax = 6, lines = 6, expands = false, placesMax = 6),
+            cols = 7, rows = 4, peopleMode = PEOPLE_INLINE, peopleMax = 6, lines = 6, expands = false, placesMax = 6,
+            contextInHead = true),
     }
 
     /** Not a widget size: the floating panel that small widgets open. */
@@ -94,6 +100,7 @@ object WidgetRenderer {
     private val PANEL_ROWS = 6
     private val PANEL_LINES = 6
     private val PANEL_PLACES = 5
+    private val PANEL_CONTEXTS = 4
 
     /** In-app screens that mirror the data and redraw with it. */
     val listeners = CopyOnWriteArraySet<() -> Unit>()
@@ -129,6 +136,8 @@ object WidgetRenderer {
             people = links.filter { it.kind == LinkKind.PERSON && !it.archived },
             places = links.filter { it.kind == LinkKind.PLACE && !it.archived },
             place = cur?.let { c -> links.firstOrNull { it.kind == LinkKind.PLACE && it.id in c.links } },
+            contexts = links.filter { it.kind == LinkKind.CONTEXT && !it.archived },
+            context = cur?.contextId?.let { id -> links.firstOrNull { it.id == id } },
             curHasMoments = cur != null && Store.hasMoments(ctx, cur.id),
             scores = Store.scores(ctx, now),
             smart = Prefs.smartOrder(ctx),
@@ -148,12 +157,13 @@ object WidgetRenderer {
     fun buildPanel(ctx: Context): RemoteViews {
         val s = snapshot(ctx)
         val rv = RemoteViews(ctx.packageName, R.layout.widget_block)
-        head(ctx, rv, s, showSince = true, withTotal = true, withPlace = true)
+        head(ctx, rv, s, showSince = true, withTotal = true, withPlace = true, withContext = true)
         rv.setOnClickPendingIntent(R.id.head, openApp(ctx))
         bar(rv, barBitmap(s))
         clear(rv, R.id.people_inline)
         people(ctx, rv, R.id.people_row, s, 5, names = true)
         places(ctx, rv, R.id.places_row, s, PANEL_PLACES)
+        contexts(ctx, rv, R.id.context_row, s, PANEL_CONTEXTS)
         grid(ctx, rv, R.id.grid, R.layout.row, R.layout.slot_big, s, PANEL_COLS, PANEL_ROWS)
         breakdown(ctx, rv, s, PANEL_LINES)
         return rv
@@ -162,7 +172,8 @@ object WidgetRenderer {
     private fun fill(ctx: Context, k: Kind, s: Snapshot, barBmp: Bitmap?): RemoteViews {
         val rv = RemoteViews(ctx.packageName, k.layout)
         val isBlock = k.layout == R.layout.widget_block
-        head(ctx, rv, s, showSince = k != Kind.TILE, withTotal = isBlock, withPlace = k.placeInHead)
+        head(ctx, rv, s, showSince = k != Kind.TILE, withTotal = isBlock, withPlace = k.placeInHead,
+            withContext = k.contextInHead)
         rv.setOnClickPendingIntent(R.id.head, if (k.expands) openPanel(ctx) else openApp(ctx))
 
         if (k.layout == R.layout.widget_strip) {
@@ -178,6 +189,7 @@ object WidgetRenderer {
             if (k.peopleMode == PEOPLE_ROW) people(ctx, rv, R.id.people_row, s, k.peopleMax, names = false)
             else clear(rv, R.id.people_row)
             places(ctx, rv, R.id.places_row, s, k.placesMax)
+            clear(rv, R.id.context_row) // context chips are only in the expand panel
             grid(ctx, rv, R.id.grid, R.layout.row, R.layout.slot, s, k.cols, k.rows)
             breakdown(ctx, rv, s, k.lines)
         }
@@ -191,6 +203,7 @@ object WidgetRenderer {
         showSince: Boolean,
         withTotal: Boolean,
         withPlace: Boolean,
+        withContext: Boolean = false,
     ) {
         val cur = s.cur
         val act = s.act
@@ -206,7 +219,7 @@ object WidgetRenderer {
         } else {
             rv.setViewVisibility(R.id.cur_elapsed, View.GONE)
         }
-        if (showSince) rv.setTextViewText(R.id.cur_since, sinceLine(s, withTotal, withPlace))
+        if (showSince) rv.setTextViewText(R.id.cur_since, sinceLine(s, withTotal, withPlace, withContext))
 
         // The note button lights up once the current activity has a note or feeling.
         rv.setInt(R.id.btn_note, "setBackgroundResource",
@@ -224,13 +237,15 @@ object WidgetRenderer {
     }
 
     /** Most changeable first, so a narrow widget clips the least useful part. */
-    private fun sinceLine(s: Snapshot, withTotal: Boolean, withPlace: Boolean): String {
+    private fun sinceLine(s: Snapshot, withTotal: Boolean, withPlace: Boolean, withContext: Boolean): String {
         val cur: Entry = s.cur ?: return s.sinceText.ifBlank { "Tap a button to start" }
         val parts = ArrayList<String>()
         val names = s.people.filter { it.id in cur.links }.map { it.title }
         if (names.isNotEmpty()) parts.add(names.joinToString(", "))
         val place = s.place
         if (withPlace && place != null) parts.add(if (place.emoji.isBlank()) "at " + place.title else place.label)
+        val context = s.context
+        if (withContext && context != null) parts.add(if (context.emoji.isBlank()) "in " + context.title else context.label)
         parts.add(s.sinceText)
         if (withTotal && s.todayTotal > 0) parts.add(Fmt.dur(s.todayTotal) + " today")
         return parts.joinToString(" · ")
@@ -309,6 +324,10 @@ object WidgetRenderer {
     private fun places(ctx: Context, rv: RemoteViews, container: Int, s: Snapshot, max: Int) =
         chips(ctx, rv, container, s, s.places, max, names = true)
 
+    /** What this is part of (a trip, an event): tap to set it on what you're doing now, again to clear. */
+    private fun contexts(ctx: Context, rv: RemoteViews, container: Int, s: Snapshot, max: Int) =
+        chips(ctx, rv, container, s, s.contexts, max, names = true) { l, cur -> l.id == cur.contextId }
+
     private fun chips(
         ctx: Context,
         rv: RemoteViews,
@@ -317,6 +336,7 @@ object WidgetRenderer {
         items: List<Link>,
         max: Int,
         names: Boolean,
+        isOn: (Link, Entry) -> Boolean = { l, cur -> l.id in cur.links },
     ) {
         rv.removeAllViews(container)
         val cur = s.cur
@@ -326,11 +346,11 @@ object WidgetRenderer {
         }
         rv.setViewVisibility(container, View.VISIBLE)
         // The ones you've marked stay visible even if there are more than there's room for.
-        items.sortedByDescending { it.id in cur.links }.take(max).forEach { p ->
+        items.sortedByDescending { isOn(it, cur) }.take(max).forEach { p ->
             val chip = RemoteViews(ctx.packageName, R.layout.chip)
             chip.setTextViewText(R.id.chip, if (names) p.label else p.badge)
             chip.setInt(R.id.chip, "setBackgroundResource",
-                if (p.id in cur.links) R.drawable.slot_on else R.drawable.slot_off)
+                if (isOn(p, cur)) R.drawable.slot_on else R.drawable.slot_off)
             chip.setOnClickPendingIntent(R.id.chip, NowWidget.linkIntent(ctx, p.id))
             rv.addView(container, chip)
         }

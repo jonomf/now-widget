@@ -3,6 +3,7 @@ package com.jono.nowwidget
 import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
+import android.database.SQLException
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.jono.nowwidget.core.Act
@@ -19,6 +20,7 @@ import com.jono.nowwidget.core.MomentKind
 import com.jono.nowwidget.core.Mood
 import com.jono.nowwidget.core.PALETTE
 import com.jono.nowwidget.core.Schema
+import com.jono.nowwidget.core.StoreSql
 import com.jono.nowwidget.core.Span
 import com.jono.nowwidget.core.TagTarget
 import com.jono.nowwidget.core.levelFace
@@ -55,7 +57,7 @@ private class Helper(ctx: Context) : SQLiteOpenHelper(ctx, "now.db", null, Schem
     override fun onCreate(db: SQLiteDatabase) {
         Schema.create().forEach { db.execSQL(it) }
         SEEDS.forEachIndexed { i, s ->
-            db.insert("activity", null, ContentValues().apply {
+            db.insertOrThrow("activity", null, ContentValues().apply {
                 put("name", s.name)
                 put("emoji", s.emoji)
                 put("color", PALETTE[i % PALETTE.size])
@@ -70,8 +72,14 @@ private class Helper(ctx: Context) : SQLiteOpenHelper(ctx, "now.db", null, Schem
     }
 }
 
-/** What an import did. */
-data class ImportResult(val added: Int, val alreadyThere: Int, val skipped: Int)
+/** What an import did. [firstTs]/[lastTs] span the check-ins it added (null if none). */
+data class ImportResult(
+    val added: Int,
+    val alreadyThere: Int,
+    val skipped: Int,
+    val firstTs: Long?,
+    val lastTs: Long?,
+)
 
 object Store {
     private const val DOUBLE_TAP_MS = 700L
@@ -134,7 +142,7 @@ object Store {
         }
         return if (id == null) {
             v.put("pos", nextPos(ctx, "activity"))
-            db(ctx).insert("activity", null, v)
+            db(ctx).insertOrThrow("activity", null, v)
         } else {
             db(ctx).update("activity", v, "id=?", args(id))
             id
@@ -185,7 +193,7 @@ object Store {
         }
         return if (id == null) {
             v.put("pos", nextPos(ctx, "link"))
-            db(ctx).insert("link", null, v)
+            db(ctx).insertOrThrow("link", null, v)
         } else {
             db(ctx).update("link", v, "id=?", args(id))
             id
@@ -241,7 +249,7 @@ object Store {
             }
             d.execSQL("UPDATE mood SET pos = pos + 1 WHERE pos >= ?", arrayOf<Any>(pos))
             v.put("pos", pos)
-            d.insert("mood", null, v)
+            d.insertOrThrow("mood", null, v)
         }
     }
 
@@ -271,7 +279,7 @@ object Store {
         }
         return if (id == null) {
             v.put("pos", nextPos(ctx, "feeling_tag"))
-            db(ctx).insert("feeling_tag", null, v)
+            db(ctx).insertOrThrow("feeling_tag", null, v)
         } else {
             db(ctx).update("feeling_tag", v, "id=?", args(id))
             id
@@ -316,7 +324,7 @@ object Store {
         ).use { c -> if (c.moveToFirst()) readEntry(c) else null }
 
     private fun insert(ctx: Context, activityId: Long, start: Long, contextId: Long? = null): Long =
-        db(ctx).insert("entry", null, ContentValues().apply {
+        db(ctx).insertOrThrow("entry", null, ContentValues().apply {
             put("activity_id", activityId)
             put("start_ms", start)
             if (contextId != null) put("context_id", contextId) else putNull("context_id")
@@ -337,18 +345,36 @@ object Store {
             activityId = activityId,
             now = now,
             stepMinutes = Prefs.stepMinutes(ctx),
+            inheritedContextId = cur?.let { contextBefore(ctx, it) },
         )
         when (action) {
-            is LogRules.Tap.Start -> insert(ctx, action.activityId, action.at)
+            is LogRules.Tap.Start ->
+                insert(ctx, action.activityId, action.at, LogRules.contextForNew(action.activityId, lastContext(ctx)))
             is LogRules.Tap.MoveBack -> if (cur != null) moveBack(ctx, cur, action.byMs)
             is LogRules.Tap.Undo -> if (cur != null) deleteEntry(ctx, cur.id)
             is LogRules.Tap.Replace -> if (cur != null) {
-                deleteEntry(ctx, cur.id)
-                val at = action.startAt
-                if (at != null) insert(ctx, activityId, at)
+                // One transaction: the mistake goes, and its replacement keeps its people,
+                // place and context.
+                tx(ctx) {
+                    deleteEntry(ctx, cur.id)
+                    val at = action.startAt
+                    if (at != null) {
+                        val id = insert(ctx, activityId, at, cur.contextId)
+                        writeLinks(ctx, id, cur.links)
+                    }
+                }
             }
         }
     }
+
+    private fun contextQuery(ctx: Context, sql: String, a: Array<String>?): Long? =
+        db(ctx).rawQuery(sql, a).use { c -> if (c.moveToFirst()) c.longOrNull(0) else null }
+
+    /** The context a new entry picks up: that of the last non-idle entry. */
+    private fun lastContext(ctx: Context): Long? = contextQuery(ctx, StoreSql.LAST_CONTEXT, null)
+
+    private fun contextBefore(ctx: Context, e: Entry): Long? =
+        contextQuery(ctx, StoreSql.CONTEXT_BEFORE, args(e.start, e.start, e.id))
 
     private fun moveBack(ctx: Context, cur: Entry, byMs: Long) {
         val prev = before(ctx, cur)
@@ -369,6 +395,10 @@ object Store {
     fun toggleLink(ctx: Context, linkId: Long) {
         val cur = current(ctx) ?: return
         val link = allLinks(ctx).firstOrNull { it.id == linkId } ?: return
+        if (link.kind == LinkKind.CONTEXT) {
+            setContext(ctx, cur.id, if (cur.contextId == linkId) null else linkId)
+            return
+        }
         if (link.kind == LinkKind.PLACE) {
             setPlace(ctx, cur.id, if (linkId in cur.links) null else linkId)
             return
@@ -428,7 +458,7 @@ object Store {
         val d = db(ctx)
         d.delete("entry_link", "entry_id=?", args(entryId))
         links.forEach { l ->
-            d.insert("entry_link", null, ContentValues().apply {
+            d.insertOrThrow("entry_link", null, ContentValues().apply {
                 put("entry_id", entryId)
                 put("link_id", l)
             })
@@ -438,9 +468,9 @@ object Store {
     /** Its notes and feelings stay, as moments of their own at the same time. */
     fun deleteEntry(ctx: Context, id: Long) {
         tx(ctx) { d ->
-            d.execSQL("UPDATE moment SET entry_id = NULL WHERE entry_id = ?", arrayOf<Any>(id))
-            d.delete("entry_link", "entry_id=?", args(id))
-            d.delete("entry", "id=?", args(id))
+            d.execSQL(StoreSql.DETACH_MOMENTS, arrayOf<Any>(id))
+            d.execSQL(StoreSql.DELETE_ENTRY_LINKS, arrayOf<Any>(id))
+            d.execSQL(StoreSql.DELETE_ENTRY, arrayOf<Any>(id))
         }
     }
 
@@ -540,7 +570,7 @@ object Store {
             if (moodId != null) put("mood_id", moodId) else putNull("mood_id")
             if (entryId != null) put("entry_id", entryId) else putNull("entry_id")
         }
-        val id = d.insert("moment", null, v)
+        val id = d.insertOrThrow("moment", null, v)
         writeTags(d, id, tags)
         id
     }
@@ -561,7 +591,7 @@ object Store {
 
     private fun writeTags(d: SQLiteDatabase, momentId: Long, tags: Collection<Long>) {
         tags.distinct().forEach { t ->
-            d.insert("moment_tag", null, ContentValues().apply {
+            d.insertOrThrow("moment_tag", null, ContentValues().apply {
                 put("moment_id", momentId)
                 put("tag_id", t)
             })
@@ -618,7 +648,10 @@ object Store {
         var added = 0
         var there = 0
         var skipped = data.skipped
+        var firstTs: Long? = null
+        var lastTs: Long? = null
         val cal = Calendar.getInstance()
+        val insertMoment = d.compileStatement(StoreSql.INSERT_IMPORTED)
         data.entries.forEachIndexed { i, e ->
             if (i % 100 == 0) progress(i)
             val mood = data.mood(e.moodId)
@@ -627,41 +660,44 @@ object Store {
                 skipped++
                 return@forEachIndexed
             }
-            val key = Daylio.key(e, mood.name)
-            val exists = d.rawQuery("SELECT 1 FROM moment WHERE source_key = ? LIMIT 1", arrayOf(key)).use { it.moveToFirst() }
-            if (exists) {
-                there++
-                return@forEachIndexed
-            }
             cal.clear()
             cal.set(e.year, e.month - 1, e.day, e.hour, e.minute, 0)
-            val id = d.insert("moment", null, ContentValues().apply {
-                put("ts", cal.timeInMillis)
-                put("kind", MomentKind.FEELING)
-                put("title", e.title)
-                put("text", e.note)
-                put("mood_id", moodId)
-                putNull("entry_id")
-                put("source_key", key)
-            })
+            val ts = cal.timeInMillis
+            val plain = Daylio.key(e, mood.name)
+            val noteAtKey = d.rawQuery(StoreSql.NOTE_AT_KEY, arrayOf(plain)).use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+            val altTaken = noteAtKey != null && noteAtKey != e.note &&
+                d.rawQuery(StoreSql.KEY_TAKEN, arrayOf(Daylio.altKey(e, mood.name))).use { it.moveToFirst() }
+            val native = d.rawQuery(StoreSql.NATIVE_FEELING_AT, args(moodId, ts, ts + 60_000L)).use { it.moveToFirst() }
+            val key = when (val dec = Daylio.decide(e, mood.name, noteAtKey, altTaken, native)) {
+                is Daylio.Decision.Skip -> {
+                    there++
+                    return@forEachIndexed
+                }
+                is Daylio.Decision.Insert -> dec.key
+            }
+            insertMoment.clearBindings()
+            insertMoment.bindLong(1, ts)
+            insertMoment.bindString(2, e.title)
+            insertMoment.bindString(3, e.note)
+            insertMoment.bindLong(4, moodId)
+            insertMoment.bindString(5, key)
+            val id = insertMoment.executeInsert()
+            if (id == -1L) throw SQLException("Couldn't save a check-in")
             e.tagIds.distinct().mapNotNull { resolve(it) }.distinct().forEach { (kind, refId) ->
                 if (kind == "tag") {
-                    d.insert("moment_tag", null, ContentValues().apply {
-                        put("moment_id", id)
-                        put("tag_id", refId)
-                    })
+                    d.execSQL(StoreSql.INSERT_MOMENT_TAG, arrayOf<Any>(id, refId))
                 } else {
-                    d.insertWithOnConflict("moment_ref", null, ContentValues().apply {
-                        put("moment_id", id)
-                        put("kind", kind)
-                        put("ref_id", refId)
-                    }, SQLiteDatabase.CONFLICT_IGNORE)
+                    d.execSQL(StoreSql.INSERT_MOMENT_REF, arrayOf<Any>(id, kind, refId))
                 }
             }
             added++
+            firstTs = minOf(firstTs ?: ts, ts)
+            lastTs = maxOf(lastTs ?: ts, ts)
         }
         progress(data.entries.size)
-        ImportResult(added, there, skipped)
+        ImportResult(added, there, skipped, firstTs, lastTs)
     }
 
     private fun findOrAddAct(ctx: Context, name: String): Long {
@@ -672,6 +708,13 @@ object Store {
         return saveAct(ctx, null, name.trim(), name.trim().take(1).uppercase(Locale.ROOT),
             PALETTE[all.size % PALETTE.size], "", false)
     }
+
+    /** The earliest and latest thing logged (entry or moment), or null when there's nothing. */
+    fun firstAndLast(ctx: Context): Pair<Long, Long>? =
+        db(ctx).rawQuery(
+            "SELECT MIN(t), MAX(t) FROM (SELECT start_ms AS t FROM entry UNION ALL SELECT ts AS t FROM moment)",
+            null,
+        ).use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) to c.getLong(1) else null }
 
     // --- Smart button order ---
 

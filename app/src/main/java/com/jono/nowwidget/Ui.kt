@@ -35,7 +35,15 @@ object Fmt {
 
     fun time(ctx: Context, ms: Long): String = DateFormat.getTimeFormat(ctx).format(Date(ms))
 
-    fun day(ms: Long): String = DateFormat.format("EEE, MMM d", Date(ms)).toString()
+    /** "Mon, Nov 16", with the year when it isn't this year. */
+    fun day(ms: Long): String {
+        val thisYear = DateFormat.format("yyyy", Date()).toString()
+        val f = if (DateFormat.format("yyyy", Date(ms)).toString() == thisYear) "EEE, MMM d" else "EEE, MMM d, yyyy"
+        return DateFormat.format(f, Date(ms)).toString()
+    }
+
+    /** "Jan 4, 2019", for dates that may be years ago. */
+    fun date(ms: Long): String = DateFormat.format("MMM d, yyyy", Date(ms)).toString()
 
     fun since(ctx: Context, start: Long): String {
         val today = today()

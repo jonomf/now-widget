@@ -87,7 +87,7 @@ class ManageActivity : Activity() {
                 for (i in 0 until kindTabs.childCount) kindTabs.getChildAt(i).alpha = if (kinds[i] == kind) 1f else 0.55f
                 hint.text = when (kind) {
                     LinkKind.PLACE -> "Where you are. Pick one in the 📝 box, the timeline, or on the biggest widget and the expanded panel."
-                    LinkKind.CONTEXT -> "What a stretch of time is part of, like a trip or an event. Pick one in the 📝 box or the timeline."
+                    LinkKind.CONTEXT -> "What a stretch of time is part of, like a trip or an event. It carries on to each new activity until you clear it. Set it in the 📝 box, the expand panel or the timeline."
                     else -> "On larger widgets and the expanded notification, tap someone to mark that you're with them."
                 }
                 addButton.text = "Add " + kindName(kind)

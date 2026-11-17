@@ -112,6 +112,15 @@
         android:orientation="horizontal"
         android:visibility="gone" />
 
+    <!-- Contexts (a trip, an event), on the expand panel only. -->
+    <LinearLayout
+        android:id="@+id/context_row"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="2dp"
+        android:orientation="horizontal"
+        android:visibility="gone" />
+
     <LinearLayout
         android:id="@+id/grid"
         android:layout_width="match_parent"

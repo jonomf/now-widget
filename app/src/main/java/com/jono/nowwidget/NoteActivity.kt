@@ -24,7 +24,7 @@ class NoteActivity : Activity() {
 
         val where = LinkRow(this, LinkKind.PLACE, "Where", curPlace)
         val context = LinkRow(this, LinkKind.CONTEXT, "Context", cur?.contextId)
-        val form = CheckInForm(this, null, listOf(where.view, context.view))
+        val form = CheckInForm(this, null, listOf(where.view, context.view), pinFaces = true)
 
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -48,9 +48,16 @@ class NoteActivity : Activity() {
         }
         col.addView(form.view)
 
+        // The faces stay above the scrolling part, so the keyboard doesn't push them out of view.
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(form.faceView.apply { setPadding(dp(20), dp(8), dp(20), 0) })
+            addView(ScrollView(this@NoteActivity).apply { addView(col) })
+        }
+
         val b = AlertDialog.Builder(this)
             .setTitle("📝 " + (act?.let { it.emoji + " " + it.name } ?: "Check in"))
-            .setView(ScrollView(this).apply { addView(col) })
+            .setView(outer)
             .setPositiveButton("Save") { _, _ -> save(form, where, context) }
             .setNegativeButton("Cancel", null)
             .setOnDismissListener { finish() }

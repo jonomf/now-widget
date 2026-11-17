@@ -3,26 +3,37 @@ package com.jono.nowwidget
 import android.app.Activity
 import android.app.AlertDialog
 import android.text.InputType
+import android.view.Gravity
 import android.view.View
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import com.jono.nowwidget.core.Moment
 
 /**
  * How you feel and what's on your mind: a row of mood faces (tap again to clear), feeling tags
  * (most used first, "+" adds one), any [extras] (where, context), then the note.
  * Used by the 📝 box and by the timeline's moment editor.
+ *
+ * With [pinFaces], the faces go in [faceView] instead of [view], so the caller can keep them
+ * above the scrolling part (where the keyboard can't push them away).
  */
-class CheckInForm(private val a: Activity, initial: Moment?, extras: List<View> = emptyList()) {
+class CheckInForm(
+    private val a: Activity,
+    initial: Moment?,
+    extras: List<View> = emptyList(),
+    pinFaces: Boolean = false,
+) {
     val view: LinearLayout = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
+    val faceView: LinearLayout = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
     var moodId: Long? = initial?.moodId
         private set
     val tags: MutableSet<Long> = initial?.tags?.toMutableSet() ?: LinkedHashSet()
     val text: EditText
 
-    private val faces = ArrayList<Pair<Long, TextView>>()
+    private val faces = ArrayList<Pair<Long, View>>()
     private val moodName = TextView(a).apply {
         textSize = 13f
         alpha = 0.7f
@@ -31,23 +42,44 @@ class CheckInForm(private val a: Activity, initial: Moment?, extras: List<View> 
 
     init {
         val moods = Store.allMoods(a).filter { !it.archived || it.id == moodId }.sortedWith(compareBy({ it.level }, { it.pos }))
+        // When two moods share a level (an imported custom mood, say), their faces can look the
+        // same, so every face gets its name under it.
+        val named = moods.groupBy { it.level }.any { it.value.size > 1 }
         val faceRow = WrapLayout(a)
         moods.forEach { m ->
-            val face = TextView(a).apply {
-                text = moodFace(m)
-                textSize = 28f
+            val cell = LinearLayout(a).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
                 setPadding(a.dp(8), a.dp(4), a.dp(8), a.dp(4))
                 contentDescription = m.name
+                addView(TextView(a).apply {
+                    text = moodFace(m)
+                    textSize = 28f
+                    gravity = Gravity.CENTER
+                })
+                if (named) {
+                    addView(TextView(a).apply {
+                        text = m.name
+                        textSize = 11f
+                        gravity = Gravity.CENTER
+                        setSingleLine(true)
+                    })
+                }
                 setOnClickListener {
                     moodId = if (moodId == m.id) null else m.id
                     markFaces()
                 }
+                setOnLongClickListener {
+                    Toast.makeText(a, m.name, Toast.LENGTH_SHORT).show()
+                    true
+                }
             }
-            faces.add(m.id to face)
-            faceRow.addView(face)
+            faces.add(m.id to cell)
+            faceRow.addView(cell)
         }
-        view.addView(faceRow)
-        view.addView(moodName)
+        val faceHolder = if (pinFaces) faceView else view
+        faceHolder.addView(faceRow)
+        faceHolder.addView(moodName)
         markFaces()
 
         view.addView(a.label("Feeling"))

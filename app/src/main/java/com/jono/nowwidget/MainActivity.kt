@@ -125,6 +125,7 @@ class MainActivity : Activity() {
         col.addView(heading("Your data"))
         col.addView(note("Everything stays on this phone. The app has no internet permission."))
         col.addView(button("Export CSV") { startExport(REQUEST_EXPORT, "now-", "") })
+        col.addView(button("Export check-ins (CSV)") { startExport(REQUEST_EXPORT_MOMENTS, "now-checkins-", "") })
         col.addView(button("Export feelings (Daylio CSV)") { startExport(REQUEST_EXPORT_FEELINGS, "now-feelings-", "") })
         col.addView(button("Import from Daylio") { startActivity(Intent(this, ImportActivity::class.java)) })
         col.addView(note("Imports a Daylio backup (.daylio) or Daylio CSV. You choose where each Daylio activity goes first. Importing the same backup twice adds nothing."))
@@ -368,6 +369,7 @@ class MainActivity : Activity() {
         val text = when (requestCode) {
             REQUEST_EXPORT -> csv()
             REQUEST_EXPORT_FEELINGS -> feelingsCsv()
+            REQUEST_EXPORT_MOMENTS -> momentsCsv()
             else -> return
         }
         try {
@@ -404,6 +406,45 @@ class MainActivity : Activity() {
         return sb.toString()
     }
 
+    /**
+     * Every note and feeling, with or without a mood or an activity, plus what its activity was
+     * linked to. Nothing is left out, unlike the Daylio layout.
+     */
+    private fun momentsCsv(): String {
+        val moods = Store.allMoods(this).associateBy { it.id }
+        val tags = Store.allTags(this).associateBy { it.id }
+        val acts = Store.allActs(this).associateBy { it.id }
+        val links = Store.allLinks(this).associateBy { it.id }
+        val refs = Store.refsFor(this)
+        val entries = Store.spans(this, 0L, Long.MAX_VALUE).associateBy { it.entry.id }
+        val f = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
+        val sb = StringBuilder("time,kind,mood,level,feelings,title,text,activity,people,place,context,also\n")
+        Store.moments(this, 0L, Long.MAX_VALUE).forEach { m ->
+            val mood = m.moodId?.let { moods[it] }
+            val e = m.entryId?.let { entries[it]?.entry }
+            val linked = e?.links.orEmpty().mapNotNull { links[it] }
+            val also = refs[m.id].orEmpty().mapNotNull { (kind, id) ->
+                if (kind == "activity") acts[id]?.name else links[id]?.title
+            }
+            val fields = listOf(
+                f.format(Date(m.ts)),
+                m.kind,
+                mood?.name ?: "",
+                mood?.level?.toString() ?: "",
+                m.tags.mapNotNull { tags[it]?.name }.joinToString("; "),
+                m.title,
+                m.text,
+                e?.let { acts[it.activityId]?.name } ?: "",
+                linked.filter { it.kind == LinkKind.PERSON }.joinToString("; ") { it.title },
+                linked.filter { it.kind == LinkKind.PLACE }.joinToString("; ") { it.title },
+                e?.contextId?.let { links[it]?.title } ?: "",
+                also.joinToString("; "),
+            )
+            sb.append(Csv.line(fields)).append('\n')
+        }
+        return sb.toString()
+    }
+
     /** Feelings in Daylio's CSV layout. Tags, and the activities and links an import mapped, are its activities. */
     private fun feelingsCsv(): String {
         val moods = Store.allMoods(this).associateBy { it.id }
@@ -431,6 +472,7 @@ class MainActivity : Activity() {
         private const val RELEASES_URL = "https://github.com/jonomf/now-widget/releases/latest"
         private const val REQUEST_EXPORT = 2
         private const val REQUEST_EXPORT_FEELINGS = 3
+        private const val REQUEST_EXPORT_MOMENTS = 4
         private const val GREY = 0xFF9A9A9A.toInt()
         private const val ACCENT = 0xFF5B8DEF.toInt()
     }

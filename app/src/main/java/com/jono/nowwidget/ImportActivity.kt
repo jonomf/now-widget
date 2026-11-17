@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
@@ -24,6 +25,8 @@ import java.util.Locale
 class ImportActivity : Activity() {
     private lateinit var col: LinearLayout
     private lateinit var status: TextView
+    /** Everything below the status line: the mapping and results. Cleared for each new file. */
+    private lateinit var body: LinearLayout
     private val rows = ArrayList<Pair<Long, Spinner>>()
     private var choices: List<Pair<String, (String) -> TagTarget>> = emptyList()
     @Volatile private var busy = false
@@ -45,12 +48,14 @@ class ImportActivity : Activity() {
             text = "Pick a Daylio backup (.daylio) or a Daylio CSV export."
         }
         col.addView(status)
+        body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(body)
         setContentView(ScrollView(this).apply { addView(col) })
 
         if (savedInstanceState == null) {
             pick()
         } else {
-            col.addView(Button(this).apply {
+            body.addView(Button(this).apply {
                 text = "Pick a file"
                 setOnClickListener { pick() }
             })
@@ -74,16 +79,28 @@ class ImportActivity : Activity() {
             return
         }
         status.text = "Reading…"
+        body.removeAllViews()
+        rows.clear()
         Thread {
             try {
-                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                // Refuse a huge file from its reported size before reading any of it.
+                val size = contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+                    if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null
+                }
+                if (size != null && size > MAX_BYTES) throw TooBig()
+                val bytes = contentResolver.openInputStream(uri)?.use { readCapped(it) }
                     ?: throw IllegalArgumentException("Couldn't open the file")
                 val parsed = Daylio.read(bytes)
                 runOnUiThread { showMapping(parsed) }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                val why = when (e) {
+                    is TooBig -> "it's over 20 MB, which is far bigger than any Daylio backup."
+                    is OutOfMemoryError -> "it's too big to read on this phone."
+                    else -> e.message ?: e.javaClass.simpleName
+                }
                 runOnUiThread {
-                    status.text = "Couldn't read that file: " + (e.message ?: e.javaClass.simpleName)
-                    col.addView(Button(this).apply {
+                    status.text = "Couldn't read that file: $why"
+                    body.addView(Button(this).apply {
                         text = "Pick another file"
                         setOnClickListener { pick() }
                     })
@@ -92,8 +109,28 @@ class ImportActivity : Activity() {
         }.start()
     }
 
+    private class TooBig : Exception()
+
+    /** Reads at most [MAX_BYTES]; anything bigger is refused before it fills memory. */
+    private fun readCapped(input: java.io.InputStream): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > MAX_BYTES) throw TooBig()
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
+
     private fun showMapping(data: DaylioData) {
         if (isFinishing) return
+        // A second file starts from a clean slate, so two files' choices never mix.
+        body.removeAllViews()
+        rows.clear()
         if (data.entries.isEmpty()) {
             status.text = "No check-ins in that file."
             return
@@ -109,8 +146,8 @@ class ImportActivity : Activity() {
         status.text = "${data.entries.size} check-ins, ${d(first)} to ${d(last)}." +
             if (data.skipped > 0) " ${data.skipped} couldn't be read and will be skipped." else ""
 
-        col.addView(heading("Moods"))
-        col.addView(note(data.moods.joinToString(", ") { m ->
+        body.addView(heading("Moods"))
+        body.addView(note(data.moods.joinToString(", ") { m ->
             val known = moods.any { it.name.equals(m.name, ignoreCase = true) }
             if (known) m.name else m.name + " (new, level ${m.level ?: 3})"
         }))
@@ -135,8 +172,8 @@ class ImportActivity : Activity() {
         choices = list
         val labels = list.map { it.first }
 
-        col.addView(heading("Daylio activities"))
-        col.addView(note("Most of yours are what you were doing or who with. Send each one to a feeling, a Now activity, a person or a place. Ones sent to an activity, person or place are kept on the check-in; they never become time spans."))
+        body.addView(heading("Daylio activities"))
+        body.addView(note("Most of yours are what you were doing or who with. Send each one to a feeling, a Now activity, a person or a place. Ones sent to an activity, person or place are kept on the check-in; they never become time spans."))
         val uses = data.uses()
         data.tags.sortedByDescending { uses[it.id] ?: 0 }.forEach { t ->
             val row = LinearLayout(this).apply {
@@ -153,7 +190,7 @@ class ImportActivity : Activity() {
                 setSelection(defaultChoice(Daylio.guess(t.name, liveActs, liveLinks)))
             }
             row.addView(spinner)
-            col.addView(row)
+            body.addView(row)
             rows.add(t.id to spinner)
         }
 
@@ -165,7 +202,7 @@ class ImportActivity : Activity() {
             rows.forEach { it.second.isEnabled = false }
             runImport(data)
         }
-        col.addView(go)
+        body.addView(go)
     }
 
     /** Where Daylio.guess's answer sits in the choices list. */
@@ -186,16 +223,30 @@ class ImportActivity : Activity() {
                     runOnUiThread { status.text = "Importing… $done of $total" }
                 }
                 runOnUiThread {
-                    status.text = "Added ${r.added} check-ins." +
+                    val first = r.firstTs
+                    val last = r.lastTs
+                    status.text = "Added ${r.added} check-ins" +
+                        (if (first != null && last != null) ", from ${Fmt.date(first)} to ${Fmt.date(last)}." else ".") +
                         (if (r.alreadyThere > 0) " ${r.alreadyThere} were already here." else "") +
                         (if (r.skipped > 0) " Skipped ${r.skipped}." else "")
                     WidgetRenderer.refresh(this)
-                    col.addView(Button(this).apply {
+                    if (first != null) {
+                        body.addView(Button(this).apply {
+                            text = "Open the timeline at ${Fmt.date(first)}"
+                            setOnClickListener {
+                                startActivity(
+                                    Intent(this@ImportActivity, TimelineActivity::class.java)
+                                        .putExtra(TimelineActivity.EXTRA_DAY, first)
+                                )
+                            }
+                        })
+                    }
+                    body.addView(Button(this).apply {
                         text = "Done"
                         setOnClickListener { finish() }
                     })
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 runOnUiThread {
                     status.text = "Import failed, nothing was added: " + (e.message ?: e.javaClass.simpleName)
                 }
@@ -205,5 +256,6 @@ class ImportActivity : Activity() {
 
     companion object {
         private const val REQUEST_PICK = 5
+        private const val MAX_BYTES = 20L * 1024 * 1024
     }
 }
