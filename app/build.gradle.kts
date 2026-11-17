@@ -45,3 +45,8 @@ android {
         jvmTarget = "17"
     }
 }
+
+dependencies {
+    // Unit tests for the pure logic in core/ (no Android needed). See tools/run_core_tests.sh.
+    testImplementation("junit:junit:4.13.2")
+}

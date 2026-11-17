@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the migration test reads build 6's schema from git history
 
       - uses: actions/setup-java@v5
         with:
@@ -22,6 +24,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
+
+      - name: Check layouts and resources
+        run: python3 tools/check_layouts.py
+
+      - name: Test the database upgrade
+        run: python3 tools/test_migration.py
+
+      - name: Unit tests
+        run: gradle :app:testDebugUnitTest --stacktrace --no-daemon
 
       - name: Build
         run: gradle :app:assembleDebug --stacktrace --no-daemon
