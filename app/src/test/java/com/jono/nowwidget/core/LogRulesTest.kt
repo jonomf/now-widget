@@ -66,4 +66,35 @@ class LogRulesTest {
         assertEquals(LogRules.Tap.Start(7, now), LogRules.tap(fresh, true, prev, 7, now, 0))
         assertEquals(LogRules.Tap.Start(IDLE, now), LogRules.tap(fresh, true, prev, 6, now, 0))
     }
+
+    @Test
+    fun undoKeepsAnEntryYouMarked() {
+        val withPerson = Entry(2, 6, now - 20_000L, links = setOf(9L))
+        val withNewContext = Entry(2, 6, now - 20_000L, contextId = 4L)
+        val withInherited = Entry(2, 6, now - 20_000L, contextId = 3L)
+        // A person, place or a context you chose: tapping it again turns it off, not undo.
+        assertEquals(LogRules.Tap.Start(IDLE, now), LogRules.tap(withPerson, false, null, 6, now, 0))
+        assertEquals(LogRules.Tap.Start(IDLE, now), LogRules.tap(withNewContext, false, null, 6, now, 0, inheritedContextId = 3L))
+        // A context it only inherited doesn't count.
+        assertEquals(LogRules.Tap.Undo, LogRules.tap(withInherited, false, null, 6, now, 0, inheritedContextId = 3L))
+    }
+
+    @Test
+    fun replaceKeepsTheMistakesStartWhenItWasMarked() {
+        val prev = Entry(1, 5, now - 10 * m)
+        val marked = Entry(2, 6, now - 20_000L, links = setOf(9L))
+        // Switching back to what ran before would normally just drop the mistake; with a person
+        // on it, a new entry takes its start (and Store copies its links and context onto it).
+        assertEquals(LogRules.Tap.Replace(marked.start), LogRules.tap(marked, false, prev, 5, now, 0))
+        assertEquals(LogRules.Tap.Replace(marked.start), LogRules.tap(marked, false, prev, 7, now, 0))
+        assertTrue(LogRules.marked(marked, null))
+        assertTrue(!LogRules.marked(Entry(3, 6, 0, contextId = 2L), 2L))
+    }
+
+    @Test
+    fun contextIsStickyButNotForIdle() {
+        assertEquals(4L, LogRules.contextForNew(7, 4L))
+        assertEquals(null, LogRules.contextForNew(IDLE, 4L))
+        assertEquals(null, LogRules.contextForNew(7, null))
+    }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Proves the v1 → v2 database upgrade off the phone, with python's sqlite3.
 
-- Builds a v1 database from the exact DDL in build 6's Store.kt (git commit 79494ee).
+- Builds a v1 database from the exact DDL build 6's Store.kt ran (commit 79494ee), pasted below.
 - Fills it with realistic rows.
 - Applies the upgrade SQL read straight out of core/Schema.kt (not retyped), the way
   SQLiteOpenHelper does: in one transaction that also sets user_version.
@@ -10,12 +10,10 @@
 
 Run: python3 tools/test_migration.py   (exit code 0 = pass)
 """
-import os, re, sqlite3, subprocess, sys
+import os, re, sqlite3, sys
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 SCHEMA_KT = os.path.join(REPO, 'app/src/main/java/com/jono/nowwidget/core/Schema.kt')
-V1_COMMIT = '79494ee'
-V1_STORE = 'app/src/main/java/com/jono/nowwidget/Store.kt'
 
 LIT = r'"((?:[^"\\$]|\\.)*)"'
 failures = []
@@ -29,15 +27,26 @@ def check(cond, msg):
 
 # --- Reading the SQL out of the Kotlin sources ---
 
+# The five statements build 6 (commit 79494ee, Store.kt onCreate) ran, copied verbatim. This is
+# the source of truth for what a v1 database on the phone looks like.
+V1_DDL = [
+    "CREATE TABLE activity (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+    "emoji TEXT NOT NULL, color INTEGER NOT NULL, pos INTEGER NOT NULL, "
+    "show_btn INTEGER NOT NULL DEFAULT 1, grp TEXT NOT NULL DEFAULT '', "
+    "archived INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE person (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+    "emoji TEXT NOT NULL DEFAULT '', pos INTEGER NOT NULL, "
+    "archived INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE entry (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "activity_id INTEGER NOT NULL, start_ms INTEGER NOT NULL, note TEXT NOT NULL DEFAULT '')",
+    "CREATE INDEX entry_start ON entry (start_ms)",
+    "CREATE TABLE entry_person (entry_id INTEGER NOT NULL, person_id INTEGER NOT NULL, "
+    "PRIMARY KEY (entry_id, person_id))",
+]
+
+
 def v1_ddl():
-    src = subprocess.run(['git', '-C', REPO, 'show', f'{V1_COMMIT}:{V1_STORE}'],
-                         check=True, capture_output=True, text=True).stdout
-    on_create = src[src.index('override fun onCreate'):src.index('SEEDS.forEachIndexed')]
-    out = []
-    for m in re.finditer(r'db\.execSQL\(\s*((?:' + LIT + r'\s*\+?\s*)+)\)', on_create):
-        out.append(''.join(re.findall(LIT, m.group(1))))
-    assert len(out) == 5, out
-    return out
+    return V1_DDL
 
 
 def schema_list(name):
@@ -158,7 +167,7 @@ def main():
     tmp = '/tmp/now-migration-test'
     os.makedirs(tmp, exist_ok=True)
     up = statements('upgradeFrom1')
-    print(f'v1 DDL: {len(v1_ddl())} statements from {V1_COMMIT}; upgrade: {len(up)} statements from Schema.kt')
+    print(f'v1 DDL: {len(v1_ddl())} statements (build 6); upgrade: {len(up)} statements from Schema.kt')
 
     # 1. A crash half way through leaves the v1 database exactly as it was.
     db = make_v1(tmp + '/crash.db')
@@ -239,6 +248,24 @@ def main():
     a, b = schema_shape(db), schema_shape(fresh)
     for k in sorted(set(a) | set(b)):
         check(a.get(k) == b.get(k), f'schema differs at {k}: upgraded={a.get(k)} fresh={b.get(k)}')
+    # AUTOINCREMENT (ids never reused) survives on every table that asked for it, both ways.
+    def auto_tables(stmts):
+        return {re.match(r'CREATE TABLE (\w+)', x).group(1) for x in stmts
+                if x.startswith('CREATE TABLE') and 'AUTOINCREMENT' in x}
+    want_v1 = auto_tables(V1_DDL)
+    want_v2 = want_v1 | auto_tables(statements('create'))
+    check(want_v1 == {'activity', 'person', 'entry'}, f'v1 AUTOINCREMENT tables: {want_v1}')
+    check({'link', 'mood', 'moment', 'feeling_tag'} <= want_v2, f'v2 AUTOINCREMENT tables: {want_v2}')
+    for label, conn in (('upgraded', db), ('fresh', fresh)):
+        for t in sorted(want_v2):
+            sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone()
+            check(sql is not None and 'AUTOINCREMENT' in sql[0], f'{label}: {t} lost AUTOINCREMENT')
+    v1 = make_v1(tmp + '/v1-auto.db')
+    for t in sorted(want_v1):
+        sql = v1.execute("SELECT sql FROM sqlite_master WHERE name=?", (t,)).fetchone()[0]
+        check('AUTOINCREMENT' in sql, f'v1: {t} has no AUTOINCREMENT')
+    v1.close()
+
     check(rows(fresh, 'SELECT name, level, emoji, pos FROM mood ORDER BY id') ==
           rows(db, 'SELECT name, level, emoji, pos FROM mood ORDER BY id'), 'same mood seed both ways')
 

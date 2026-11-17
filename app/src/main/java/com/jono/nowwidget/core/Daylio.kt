@@ -309,6 +309,44 @@ object Daylio {
     )
 
     /**
+     * The key for a check-in whose plain [key] is already taken by one with a different note
+     * (two check-ins in the same minute with the same mood): the plain key plus a short hash of
+     * its note. Depends only on the entry, so importing the file again finds it.
+     */
+    fun altKey(e: DaylioEntry, moodName: String): String {
+        val crc = java.util.zip.CRC32()
+        crc.update(e.note.toByteArray(Charsets.UTF_8))
+        return key(e, moodName) + ":" + String.format(Locale.ROOT, "%08x", crc.value)
+    }
+
+    /** What to do with one incoming check-in, given what's already stored. */
+    sealed class Decision {
+        /** Already here (same key and note, or a feeling you logged in Now at that minute and mood). */
+        object Skip : Decision()
+
+        data class Insert(val key: String) : Decision()
+    }
+
+    /**
+     * [noteAtKey] is the note of the stored moment with the plain key (null if none);
+     * [altTaken] says whether the alternative key is stored; [nativeMatch] says whether a feeling
+     * logged in Now (not imported) has the same minute and mood.
+     */
+    fun decide(
+        e: DaylioEntry,
+        moodName: String,
+        noteAtKey: String?,
+        altTaken: Boolean,
+        nativeMatch: Boolean,
+    ): Decision = when {
+        nativeMatch -> Decision.Skip
+        noteAtKey == null -> Decision.Insert(key(e, moodName))
+        noteAtKey == e.note -> Decision.Skip
+        altTaken -> Decision.Skip
+        else -> Decision.Insert(altKey(e, moodName))
+    }
+
+    /**
      * First guess for a tag: an activity or link with exactly that name (any case), else a
      * feeling tag. "long" and "Other" stay feelings even though "Other" is also an activity.
      */

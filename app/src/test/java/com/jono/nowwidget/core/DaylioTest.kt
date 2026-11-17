@@ -119,4 +119,33 @@ class DaylioTest {
     fun junkIsRejected() {
         Daylio.read("hello there, not a backup".toByteArray())
     }
+
+    private fun entry(note: String) = DaylioEntry(2020, 1, 4, 9, 30, 1, emptyList(), note, "")
+
+    @Test
+    fun keysForSameMinuteAndMood() {
+        val a = entry("first")
+        val b = entry("second")
+        assertEquals("daylio:2020-01-04 09:30:rad", Daylio.key(a, "Rad"))
+        // The alternative key depends only on the note, so it's the same on every import.
+        assertTrue(Daylio.altKey(b, "rad").startsWith("daylio:2020-01-04 09:30:rad:"))
+        assertEquals(Daylio.altKey(b, "rad"), Daylio.altKey(entry("second"), "rad"))
+        assertTrue(Daylio.altKey(a, "rad") != Daylio.altKey(b, "rad"))
+    }
+
+    @Test
+    fun decideKeepsDifferentNotesAndSkipsRepeats() {
+        val a = entry("first")
+        val b = entry("second")
+        // Nothing there yet: the plain key.
+        assertEquals(Daylio.Decision.Insert(Daylio.key(a, "rad")), Daylio.decide(a, "rad", null, false, false))
+        // Same key, same note: already imported.
+        assertEquals(Daylio.Decision.Skip, Daylio.decide(a, "rad", "first", false, false))
+        // Same key, different note: a second check-in in that minute, kept under its own key...
+        assertEquals(Daylio.Decision.Insert(Daylio.altKey(b, "rad")), Daylio.decide(b, "rad", "first", false, false))
+        // ...which a re-import then finds.
+        assertEquals(Daylio.Decision.Skip, Daylio.decide(b, "rad", "first", true, false))
+        // A feeling logged in Now at that minute and mood (exported, then imported back): skip.
+        assertEquals(Daylio.Decision.Skip, Daylio.decide(a, "rad", null, false, true))
+    }
 }

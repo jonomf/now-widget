@@ -57,10 +57,21 @@ object LogRules {
     }
 
     /**
+     * True when the latest entry carries something you added by hand: a person or place, or a
+     * context other than the one it inherited. [inheritedContextId] is the context of the last
+     * non-idle entry before it (what a new entry picks up on its own).
+     */
+    fun marked(latest: Entry, inheritedContextId: Long?): Boolean =
+        latest.links.isNotEmpty() || (latest.contextId != null && latest.contextId != inheritedContextId)
+
+    /**
      * - A different activity: it starts now, and that ends the last one.
      * - Within a minute of the last switch: that was a mistake, so replace it instead of logging it.
+     *   The replacement keeps the mistaken entry's start, people, place and context.
      *   An entry that has a note or feeling on it was no mistake, so it's never replaced.
      * - The current activity again: turn it off, or move its start back if that's the setting.
+     *   Within a minute it's undone instead, unless you'd already added a note, feeling, person,
+     *   place or context to it.
      */
     fun tap(
         latest: Entry?,
@@ -69,17 +80,30 @@ object LogRules {
         activityId: Long,
         now: Long,
         stepMinutes: Int,
+        inheritedContextId: Long? = null,
     ): Tap {
         if (latest == null) return Tap.Start(activityId, now)
         val fresh = now - latest.start < GRACE_MS && !latestHasMoments
+        val isMarked = marked(latest, inheritedContextId)
         if (latest.activityId == activityId) {
             return when {
                 stepMinutes > 0 -> Tap.MoveBack(stepMinutes * 60_000L)
-                fresh -> Tap.Undo
+                fresh && !isMarked -> Tap.Undo
                 else -> Tap.Start(IDLE, now)
             }
         }
-        if (fresh) return Tap.Replace(if (before?.activityId != activityId) latest.start else null)
+        if (fresh) {
+            // Only drop back to the entry before when nothing you added would be lost.
+            val keepGoing = before?.activityId == activityId && !isMarked
+            return Tap.Replace(if (keepGoing) null else latest.start)
+        }
         return Tap.Start(activityId, now)
     }
+
+    /**
+     * Context is sticky: a new entry carries the context of the last non-idle entry, even across
+     * an idle gap, until you clear it. Idle entries never carry one.
+     */
+    fun contextForNew(activityId: Long, lastNonIdleContextId: Long?): Long? =
+        if (activityId == IDLE) null else lastNonIdleContextId
 }

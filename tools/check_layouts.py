@@ -15,7 +15,7 @@ for f in glob.glob(root+'/res/**/*.xml',recursive=True)+[root+'/AndroidManifest.
 need={
  'widget_tile':'root head cur_emoji cur_name cur_elapsed btn_note update_symbol claude',
  'widget_strip':'root head cur_emoji cur_name cur_elapsed cur_since slots btn_note update_symbol claude',
- 'widget_block':'root head cur_emoji cur_name cur_elapsed cur_since bar people_inline people_row places_row grid breakdown btn_note update_symbol claude',
+ 'widget_block':'root head cur_emoji cur_name cur_elapsed cur_since bar people_inline people_row places_row context_row grid breakdown btn_note update_symbol claude',
  'slot':'slot_root slot_emoji slot_label','slot_compact':'slot_root slot_emoji slot_label','slot_big':'slot_root slot_emoji slot_label',
  'row':'row','row_fixed':'row','chip':'chip','breakdown_row':'b_root b_name b_time',
  'notif_collapsed':'row','notif_big':'grid people_row'}

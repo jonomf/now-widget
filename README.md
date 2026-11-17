@@ -19,5 +19,6 @@ Everything stays on the phone. The app has no internet permission. Moods, feelin
 
 - `python3 tools/check_layouts.py`: every view id the code uses exists in its layouts.
 - `python3 tools/test_migration.py`: upgrades a build-6 (schema v1) database with the SQL in `core/Schema.kt` and checks nothing is lost.
+- `python3 tools/test_store_sql.py`: runs the Store's own SQL (`core/StoreSql.kt`) for deletes, sticky context, import dedupe and rollback.
 - `tools/run_core_tests.sh`: the unit tests for `core/` (pure Kotlin) without the Android SDK; CI runs them with `gradle :app:testDebugUnitTest`.
 - `python3 tools/daylio_decode.py --summary file.daylio`: decode a Daylio backup. Never commit a real backup; the test fixtures are synthetic (`tools/make_daylio_fixtures.py`).
