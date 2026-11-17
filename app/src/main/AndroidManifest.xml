@@ -33,6 +33,11 @@
 
         <activity android:name=".TimelineActivity" android:exported="false" />
         <activity android:name=".ManageActivity" android:exported="false" />
+        <!-- Daylio import. Kept alive on rotation so a long import isn't restarted. -->
+        <activity
+            android:name=".ImportActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:exported="false" />
 
         <!-- Expand panel: floats over the home screen when you tap a small widget. -->
         <activity
@@ -43,7 +48,7 @@
             android:taskAffinity=""
             android:theme="@style/Panel" />
 
-        <!-- The note box. The keyboard's mic does the voice typing, so this app needs no mic access. -->
+        <!-- The 📝 check-in box. The keyboard's mic does the voice typing, so this app needs no mic access. -->
         <activity
             android:name=".NoteActivity"
             android:excludeFromRecents="true"

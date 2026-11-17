@@ -17,7 +17,13 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import com.jono.nowwidget.core.Csv
+import com.jono.nowwidget.core.Daylio
+import com.jono.nowwidget.core.DiaryDay
+import com.jono.nowwidget.core.LinkKind
+import com.jono.nowwidget.core.levelFace
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
@@ -76,7 +82,9 @@ class MainActivity : Activity() {
         // --- Customize ---
         col.addView(heading("Customize"))
         col.addView(button("Activities") { manage(ManageActivity.MODE_ACTIVITIES) })
-        col.addView(button("People") { manage(ManageActivity.MODE_PEOPLE) })
+        col.addView(button("People, places and contexts") { manage(ManageActivity.MODE_LINKS) })
+        col.addView(button("Moods") { manage(ManageActivity.MODE_MOODS) })
+        col.addView(button("Feelings") { manage(ManageActivity.MODE_TAGS) })
         col.addView(
             note("Tap a different activity to switch. Switched by mistake? Tap the right one within a minute and the mistake disappears.")
         )
@@ -108,7 +116,7 @@ class MainActivity : Activity() {
             WidgetRenderer.refresh(this)
         }
         col.addView(lockCountButton)
-        col.addView(note("This is a silent notification. Your current activity shows on the lock screen, so anyone holding your phone could see it. Expand it for more buttons and people."))
+        col.addView(note("This is a silent notification. Your current activity shows on the lock screen, so anyone holding your phone could see it. Expand it for more buttons and people. Moods, feelings and notes never show there."))
         col.addView(button("Open app info") {
             startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
         })
@@ -116,7 +124,10 @@ class MainActivity : Activity() {
         // --- Data ---
         col.addView(heading("Your data"))
         col.addView(note("Everything stays on this phone. The app has no internet permission."))
-        col.addView(button("Export CSV") { startExport() })
+        col.addView(button("Export CSV") { startExport(REQUEST_EXPORT, "now-", "") })
+        col.addView(button("Export feelings (Daylio CSV)") { startExport(REQUEST_EXPORT_FEELINGS, "now-feelings-", "") })
+        col.addView(button("Import from Daylio") { startActivity(Intent(this, ImportActivity::class.java)) })
+        col.addView(note("Imports a Daylio backup (.daylio) or Daylio CSV. You choose where each Daylio activity goes first. Importing the same backup twice adds nothing."))
 
         // --- Home screen ---
         col.addView(heading("Your widgets"))
@@ -204,19 +215,20 @@ class MainActivity : Activity() {
 
     private fun drawStats(now: Long) {
         stats.removeAllViews()
-        val from = Fmt.addDays(Fmt.startOfDay(now), -(periodDays - 1))
+        val from = DiaryDay.add(Fmt.today(), -(periodDays - 1))
         val spans = Store.spans(this, from, now)
         val acts = Store.allActs(this).associateBy { it.id }
-        val people = Store.allPeople(this).associateBy { it.id }
+        val links = Store.allLinks(this).associateBy { it.id }
 
         if (spans.isEmpty()) {
             stats.addView(note("Nothing logged in this period yet."))
+            drawMoods(from, now)
             return
         }
         if (periodDays == 1) {
             stats.addView(
                 RibbonView(this).apply {
-                    set(spans, acts.mapValues { it.value.color }, from, Fmt.addDays(from, 1))
+                    set(spans, acts.mapValues { it.value.color }, from, DiaryDay.add(from, 1))
                 },
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(18)).apply {
                     topMargin = dp(8)
@@ -230,13 +242,23 @@ class MainActivity : Activity() {
         val byGroup = HashMap<String, Long>()
         val groupColor = HashMap<String, Int>()
         val byPerson = HashMap<Long, Long>()
+        val byPlace = HashMap<Long, Long>()
         spans.forEach { s ->
             val a = acts[s.entry.activityId]
             byAct[s.entry.activityId] = (byAct[s.entry.activityId] ?: 0L) + s.ms
             val g = a?.group?.ifBlank { "Ungrouped" } ?: "Ungrouped"
             byGroup[g] = (byGroup[g] ?: 0L) + s.ms
             if (a != null && g !in groupColor) groupColor[g] = a.color
-            s.entry.people.forEach { p -> byPerson[p] = (byPerson[p] ?: 0L) + s.ms }
+            s.entry.links.forEach { id ->
+                when (links[id]?.kind) {
+                    LinkKind.PERSON -> {
+                        byPerson[id] = (byPerson[id] ?: 0L) + s.ms
+                    }
+                    LinkKind.PLACE -> {
+                        byPlace[id] = (byPlace[id] ?: 0L) + s.ms
+                    }
+                }
+            }
         }
 
         byAct.entries.sortedByDescending { it.value }.forEach { (id, ms) ->
@@ -252,9 +274,44 @@ class MainActivity : Activity() {
         if (byPerson.isNotEmpty()) {
             stats.addView(subheading("With people"))
             byPerson.entries.sortedByDescending { it.value }.forEach { (id, ms) ->
-                val p = people[id]
-                stats.addView(statRow(p?.let { (it.badge + " " + it.name) } ?: "Removed", ms, total, ACCENT))
+                val p = links[id]
+                stats.addView(statRow(p?.let { (it.badge + " " + it.title) } ?: "Removed", ms, total, ACCENT))
             }
+        }
+        if (byPlace.isNotEmpty()) {
+            stats.addView(subheading("Places"))
+            byPlace.entries.sortedByDescending { it.value }.forEach { (id, ms) ->
+                val p = links[id]
+                stats.addView(statRow(p?.let { (it.badge + " " + it.title) } ?: "Removed", ms, total, ACCENT))
+            }
+        }
+        drawMoods(from, now)
+    }
+
+    /** How you felt in the period: check-ins, the average mood (1 is best) and the top feelings. */
+    private fun drawMoods(from: Long, to: Long) {
+        val moods = Store.allMoods(this).associateBy { it.id }
+        val moments = Store.moments(this, from, to)
+        val rated = moments.mapNotNull { m -> m.moodId?.let { moods[it] } }
+        val tagCounts = HashMap<Long, Int>()
+        moments.forEach { m -> m.tags.forEach { tagCounts[it] = (tagCounts[it] ?: 0) + 1 } }
+        if (rated.isEmpty() && tagCounts.isEmpty()) return
+        stats.addView(subheading("Mood"))
+        if (rated.isNotEmpty()) {
+            val avg = rated.sumOf { it.level }.toDouble() / rated.size
+            val face = levelFace(Math.round(avg).toInt())
+            stats.addView(note(
+                "${rated.size} check-in" + (if (rated.size == 1) "" else "s") +
+                    " · average $face " + String.format(Locale.US, "%.1f", avg) + " (1 is best)"
+            ))
+            val byMood = rated.groupingBy { it.id }.eachCount()
+            stats.addView(note(byMood.entries.sortedWith(compareBy({ moods[it.key]?.level ?: 9 }, { moods[it.key]?.pos ?: 0 }))
+                .joinToString("   ") { (id, n) -> moodFace(moods[id]) + " " + n }))
+        }
+        if (tagCounts.isNotEmpty()) {
+            val tags = Store.allTags(this).associateBy { it.id }
+            stats.addView(note("Most felt: " + tagCounts.entries.sortedByDescending { it.value }.take(6)
+                .joinToString(", ") { (id, n) -> (tags[id]?.name ?: "?") + " " + n }))
         }
     }
 
@@ -294,51 +351,86 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun startExport() {
-        val name = "now-" + SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) + ".csv"
+    private fun startExport(request: Int, prefix: String, suffix: String) {
+        val name = prefix + SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) + suffix + ".csv"
         val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
             .addCategory(Intent.CATEGORY_OPENABLE)
             .setType("text/csv")
             .putExtra(Intent.EXTRA_TITLE, name)
-        startActivityForResult(i, REQUEST_EXPORT)
+        startActivityForResult(i, request)
     }
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         val uri = data?.data
-        if (requestCode != REQUEST_EXPORT || resultCode != RESULT_OK || uri == null) return
+        if (resultCode != RESULT_OK || uri == null) return
+        val text = when (requestCode) {
+            REQUEST_EXPORT -> csv()
+            REQUEST_EXPORT_FEELINGS -> feelingsCsv()
+            else -> return
+        }
         try {
-            contentResolver.openOutputStream(uri)?.use { it.write(csv().toByteArray()) }
+            contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) }
             Toast.makeText(this, "Exported", Toast.LENGTH_SHORT).show()
         } catch (e: java.io.IOException) {
             Toast.makeText(this, "Couldn't save the file", Toast.LENGTH_LONG).show()
         }
     }
 
+    /** Every span. The note column holds the texts of that entry's notes and feelings. */
     private fun csv(): String {
         val acts = Store.allActs(this).associateBy { it.id }
-        val people = Store.allPeople(this).associateBy { it.id }
+        val links = Store.allLinks(this).associateBy { it.id }
         val f = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
-        val sb = StringBuilder("start,end,minutes,activity,group,people,note\n")
+        val texts = HashMap<Long, MutableList<String>>()
+        Store.moments(this, 0L, Long.MAX_VALUE).forEach { m ->
+            val e = m.entryId
+            if (e != null && m.text.isNotBlank()) texts.getOrPut(e) { ArrayList() }.add(m.text)
+        }
+        val sb = StringBuilder("start,end,minutes,activity,group,people,note,place\n")
         Store.spans(this, 0L, System.currentTimeMillis()).forEach { s ->
             val a = acts[s.entry.activityId]
-            val names = s.entry.people.mapNotNull { people[it]?.name }.joinToString("; ")
+            val linked = s.entry.links.mapNotNull { links[it] }
             val fields = listOf(
                 f.format(Date(s.from)), f.format(Date(s.to)), (s.ms / 60_000L).toString(),
-                a?.name ?: "", a?.group ?: "", names, s.entry.note,
+                a?.name ?: "", a?.group ?: "",
+                linked.filter { it.kind == LinkKind.PERSON }.joinToString("; ") { it.title },
+                texts[s.entry.id].orEmpty().joinToString("\n"),
+                linked.filter { it.kind == LinkKind.PLACE }.joinToString("; ") { it.title },
             )
-            sb.append(fields.joinToString(",") { quote(it) }).append('\n')
+            sb.append(Csv.line(fields)).append('\n')
         }
         return sb.toString()
     }
 
-    private fun quote(v: String): String =
-        if (v.any { it == ',' || it == '"' || it == '\n' }) "\"" + v.replace("\"", "\"\"") + "\"" else v
+    /** Feelings in Daylio's CSV layout. Tags, and the activities and links an import mapped, are its activities. */
+    private fun feelingsCsv(): String {
+        val moods = Store.allMoods(this).associateBy { it.id }
+        val tags = Store.allTags(this).associateBy { it.id }
+        val acts = Store.allActs(this).associateBy { it.id }
+        val links = Store.allLinks(this).associateBy { it.id }
+        val refs = Store.refsFor(this)
+        val c = Calendar.getInstance()
+        val rows = Store.allFeelings(this).mapNotNull { m ->
+            val mood = m.moodId?.let { moods[it] } ?: return@mapNotNull null
+            c.timeInMillis = m.ts
+            val names = m.tags.mapNotNull { tags[it]?.name } + refs[m.id].orEmpty().mapNotNull { (kind, id) ->
+                if (kind == "activity") acts[id]?.name else links[id]?.title
+            }
+            Daylio.CsvRow(
+                c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1, c.get(Calendar.DAY_OF_MONTH),
+                c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE),
+                mood.name, names.distinct(), m.title, m.text,
+            )
+        }
+        return Daylio.toCsv(rows)
+    }
 
     companion object {
         private const val RELEASES_URL = "https://github.com/jonomf/now-widget/releases/latest"
         private const val REQUEST_EXPORT = 2
+        private const val REQUEST_EXPORT_FEELINGS = 3
         private const val GREY = 0xFF9A9A9A.toInt()
         private const val ACCENT = 0xFF5B8DEF.toInt()
     }

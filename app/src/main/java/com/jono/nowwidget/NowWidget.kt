@@ -22,8 +22,9 @@ class NowWidget : AppWidgetProvider() {
                 Store.tap(ctx, id)
                 WidgetRenderer.refresh(ctx)
             }
-            ACTION_PERSON -> if (id != null) {
-                Store.togglePerson(ctx, id)
+            // Person chips from build 6 used ACTION_PERSON; people kept their ids as links.
+            ACTION_LINK, ACTION_PERSON -> if (id != null) {
+                Store.toggleLink(ctx, id)
                 WidgetRenderer.refresh(ctx)
             }
             // Android 14+ lets you swipe the notification away. Keep it there; it can be
@@ -35,6 +36,7 @@ class NowWidget : AppWidgetProvider() {
     companion object {
         private const val ACTION_TAP = "com.jono.nowwidget.TAP"
         private const val ACTION_PERSON = "com.jono.nowwidget.PERSON"
+        private const val ACTION_LINK = "com.jono.nowwidget.LINK"
         private const val ACTION_DISMISSED = "com.jono.nowwidget.DISMISSED"
 
         private fun broadcast(ctx: Context, action: String, uri: String): PendingIntent =
@@ -45,7 +47,7 @@ class NowWidget : AppWidgetProvider() {
             )
 
         fun tapIntent(ctx: Context, activityId: Long) = broadcast(ctx, ACTION_TAP, "now://activity/$activityId")
-        fun personIntent(ctx: Context, personId: Long) = broadcast(ctx, ACTION_PERSON, "now://person/$personId")
+        fun linkIntent(ctx: Context, linkId: Long) = broadcast(ctx, ACTION_LINK, "now://link/$linkId")
         fun dismissedIntent(ctx: Context) = broadcast(ctx, ACTION_DISMISSED, "now://dismissed/0")
     }
 }

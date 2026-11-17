@@ -13,6 +13,10 @@ import android.util.SizeF
 import android.util.TypedValue
 import android.view.View
 import android.widget.RemoteViews
+import com.jono.nowwidget.core.Act
+import com.jono.nowwidget.core.Entry
+import com.jono.nowwidget.core.Link
+import com.jono.nowwidget.core.LinkKind
 import java.util.concurrent.CopyOnWriteArraySet
 
 /** Everything a redraw needs, loaded once and shared by every layout and the notification. */
@@ -21,7 +25,12 @@ class Snapshot(
     val cur: Entry?,
     val act: Act?,
     val buttons: List<Act>,
-    val people: List<Person>,
+    val people: List<Link>,
+    val places: List<Link>,
+    /** Where you are now, if you said. */
+    val place: Link?,
+    /** The current activity has a note or feeling on it. */
+    val curHasMoments: Boolean,
     val scores: Map<Long, Double>,
     val smart: Boolean,
     val today: List<Pair<Act, Long>>,
@@ -52,11 +61,17 @@ object WidgetRenderer {
         val peopleMax: Int = 0,
         val lines: Int = 0,
         val expands: Boolean = true,
+        /** The head line has room to say where you are. */
+        val placeInHead: Boolean = true,
+        val placesMax: Int = 0,
     ) {
-        TILE(R.layout.widget_tile, SizeF(50f, 50f), "now only"),
-        STRIP_S(R.layout.widget_strip, SizeF(150f, 50f), "now + 4 buttons", cols = 2, rows = 2, headDp = 96f),
-        STRIP(R.layout.widget_strip, SizeF(220f, 50f), "now + 8 buttons", cols = 4, rows = 2, headDp = 108f),
-        STRIP_L(R.layout.widget_strip, SizeF(320f, 50f), "now + 12 buttons", cols = 6, rows = 2, headDp = 122f),
+        TILE(R.layout.widget_tile, SizeF(50f, 50f), "now only", placeInHead = false),
+        STRIP_S(R.layout.widget_strip, SizeF(150f, 50f), "now + 4 buttons", cols = 2, rows = 2, headDp = 96f,
+            placeInHead = false),
+        STRIP(R.layout.widget_strip, SizeF(220f, 50f), "now + 8 buttons", cols = 4, rows = 2, headDp = 108f,
+            placeInHead = false),
+        STRIP_L(R.layout.widget_strip, SizeF(320f, 50f), "now + 12 buttons", cols = 6, rows = 2, headDp = 122f,
+            placeInHead = false),
         SQUARE(R.layout.widget_block, SizeF(150f, 150f), "now, split, 6 buttons", cols = 3, rows = 2),
         LARGE(R.layout.widget_block, SizeF(220f, 150f), "now, split, people, 10 buttons",
             cols = 5, rows = 2, peopleMode = PEOPLE_INLINE, peopleMax = 3),
@@ -71,13 +86,14 @@ object WidgetRenderer {
         XL(R.layout.widget_block, SizeF(320f, 250f), "now, split, people, 21 buttons, today",
             cols = 7, rows = 3, peopleMode = PEOPLE_INLINE, peopleMax = 6, lines = 3),
         XL_TALL(R.layout.widget_block, SizeF(320f, 340f), "everything",
-            cols = 7, rows = 4, peopleMode = PEOPLE_INLINE, peopleMax = 6, lines = 6, expands = false),
+            cols = 7, rows = 4, peopleMode = PEOPLE_INLINE, peopleMax = 6, lines = 6, expands = false, placesMax = 6),
     }
 
     /** Not a widget size: the floating panel that small widgets open. */
     private val PANEL_COLS = 5
     private val PANEL_ROWS = 6
     private val PANEL_LINES = 6
+    private val PANEL_PLACES = 5
 
     /** In-app screens that mirror the data and redraw with it. */
     val listeners = CopyOnWriteArraySet<() -> Unit>()
@@ -98,7 +114,8 @@ object WidgetRenderer {
         val byId = acts.associateBy { it.id }
         val cur = Store.current(ctx)
         val idle = Store.idleSince(ctx)
-        val spans = Store.spans(ctx, Fmt.startOfDay(now), now)
+        val links = Store.allLinks(ctx)
+        val spans = Store.spans(ctx, Fmt.today(), now)
         val totals = HashMap<Long, Long>()
         spans.forEach { totals[it.entry.activityId] = (totals[it.entry.activityId] ?: 0L) + it.ms }
         val today = totals.entries
@@ -109,7 +126,10 @@ object WidgetRenderer {
             cur = cur,
             act = cur?.let { byId[it.activityId] },
             buttons = acts.filter { it.show && !it.archived },
-            people = Store.allPeople(ctx).filter { !it.archived },
+            people = links.filter { it.kind == LinkKind.PERSON && !it.archived },
+            places = links.filter { it.kind == LinkKind.PLACE && !it.archived },
+            place = cur?.let { c -> links.firstOrNull { it.kind == LinkKind.PLACE && it.id in c.links } },
+            curHasMoments = cur != null && Store.hasMoments(ctx, cur.id),
             scores = Store.scores(ctx, now),
             smart = Prefs.smartOrder(ctx),
             today = today,
@@ -124,14 +144,16 @@ object WidgetRenderer {
         return RemoteViews(Kind.values().associate { it.size to fill(ctx, it, s, bar) })
     }
 
-    /** The floating panel: every button, people and today's breakdown. */
+    /** The floating panel: every button, people, places and today's breakdown. */
     fun buildPanel(ctx: Context): RemoteViews {
         val s = snapshot(ctx)
         val rv = RemoteViews(ctx.packageName, R.layout.widget_block)
-        head(ctx, rv, s, showSince = true, withTotal = true)
+        head(ctx, rv, s, showSince = true, withTotal = true, withPlace = true)
         rv.setOnClickPendingIntent(R.id.head, openApp(ctx))
         bar(rv, barBitmap(s))
+        clear(rv, R.id.people_inline)
         people(ctx, rv, R.id.people_row, s, 5, names = true)
+        places(ctx, rv, R.id.places_row, s, PANEL_PLACES)
         grid(ctx, rv, R.id.grid, R.layout.row, R.layout.slot_big, s, PANEL_COLS, PANEL_ROWS)
         breakdown(ctx, rv, s, PANEL_LINES)
         return rv
@@ -140,7 +162,7 @@ object WidgetRenderer {
     private fun fill(ctx: Context, k: Kind, s: Snapshot, barBmp: Bitmap?): RemoteViews {
         val rv = RemoteViews(ctx.packageName, k.layout)
         val isBlock = k.layout == R.layout.widget_block
-        head(ctx, rv, s, showSince = k != Kind.TILE, withTotal = isBlock)
+        head(ctx, rv, s, showSince = k != Kind.TILE, withTotal = isBlock, withPlace = k.placeInHead)
         rv.setOnClickPendingIntent(R.id.head, if (k.expands) openPanel(ctx) else openApp(ctx))
 
         if (k.layout == R.layout.widget_strip) {
@@ -148,18 +170,28 @@ object WidgetRenderer {
             grid(ctx, rv, R.id.slots, R.layout.row, R.layout.slot_compact, s, k.cols, k.rows)
         }
         if (isBlock) {
+            // Sizes share this layout and Android may reapply one onto another's views, so every
+            // optional part is set either way.
             bar(rv, barBmp)
-            when (k.peopleMode) {
-                PEOPLE_INLINE -> people(ctx, rv, R.id.people_inline, s, k.peopleMax, names = false)
-                PEOPLE_ROW -> people(ctx, rv, R.id.people_row, s, k.peopleMax, names = false)
-            }
+            if (k.peopleMode == PEOPLE_INLINE) people(ctx, rv, R.id.people_inline, s, k.peopleMax, names = false)
+            else clear(rv, R.id.people_inline)
+            if (k.peopleMode == PEOPLE_ROW) people(ctx, rv, R.id.people_row, s, k.peopleMax, names = false)
+            else clear(rv, R.id.people_row)
+            places(ctx, rv, R.id.places_row, s, k.placesMax)
             grid(ctx, rv, R.id.grid, R.layout.row, R.layout.slot, s, k.cols, k.rows)
-            if (k.lines > 0) breakdown(ctx, rv, s, k.lines)
+            breakdown(ctx, rv, s, k.lines)
         }
         return rv
     }
 
-    private fun head(ctx: Context, rv: RemoteViews, s: Snapshot, showSince: Boolean, withTotal: Boolean) {
+    private fun head(
+        ctx: Context,
+        rv: RemoteViews,
+        s: Snapshot,
+        showSince: Boolean,
+        withTotal: Boolean,
+        withPlace: Boolean,
+    ) {
         val cur = s.cur
         val act = s.act
         // A soft glow whenever nothing is on, as a nudge to pick something.
@@ -174,11 +206,11 @@ object WidgetRenderer {
         } else {
             rv.setViewVisibility(R.id.cur_elapsed, View.GONE)
         }
-        if (showSince) rv.setTextViewText(R.id.cur_since, sinceLine(s, withTotal))
+        if (showSince) rv.setTextViewText(R.id.cur_since, sinceLine(s, withTotal, withPlace))
 
-        // The note button lights up once the current activity has a note.
+        // The note button lights up once the current activity has a note or feeling.
         rv.setInt(R.id.btn_note, "setBackgroundResource",
-            if (cur != null && cur.note.isNotBlank()) R.drawable.slot_on else R.drawable.slot_off)
+            if (s.curHasMoments) R.drawable.slot_on else R.drawable.slot_off)
         rv.setOnClickPendingIntent(R.id.btn_note, openNote(ctx))
 
         ClaudeLink.bind(ctx, rv, R.id.claude, room = showSince)  // not on the 1×1 tile
@@ -192,18 +224,23 @@ object WidgetRenderer {
     }
 
     /** Most changeable first, so a narrow widget clips the least useful part. */
-    private fun sinceLine(s: Snapshot, withTotal: Boolean): String {
-        if (s.cur == null) return s.sinceText.ifBlank { "Tap a button to start" }
+    private fun sinceLine(s: Snapshot, withTotal: Boolean, withPlace: Boolean): String {
+        val cur: Entry = s.cur ?: return s.sinceText.ifBlank { "Tap a button to start" }
         val parts = ArrayList<String>()
-        val names = s.people.filter { it.id in s.cur.people }.map { it.name }
+        val names = s.people.filter { it.id in cur.links }.map { it.title }
         if (names.isNotEmpty()) parts.add(names.joinToString(", "))
+        val place = s.place
+        if (withPlace && place != null) parts.add(if (place.emoji.isBlank()) "at " + place.title else place.label)
         parts.add(s.sinceText)
         if (withTotal && s.todayTotal > 0) parts.add(Fmt.dur(s.todayTotal) + " today")
         return parts.joinToString(" · ")
     }
 
     private fun bar(rv: RemoteViews, bmp: Bitmap?) {
-        if (bmp == null) return
+        if (bmp == null) {
+            rv.setViewVisibility(R.id.bar, View.GONE)
+            return
+        }
         rv.setViewVisibility(R.id.bar, View.VISIBLE)
         rv.setImageViewBitmap(R.id.bar, bmp)
     }
@@ -260,30 +297,51 @@ object WidgetRenderer {
         return v
     }
 
-    fun people(ctx: Context, rv: RemoteViews, container: Int, s: Snapshot, max: Int, names: Boolean) {
+    private fun clear(rv: RemoteViews, container: Int) {
         rv.removeAllViews(container)
-        if (s.people.isEmpty() || s.cur == null || max <= 0) return
+        rv.setViewVisibility(container, View.GONE)
+    }
+
+    fun people(ctx: Context, rv: RemoteViews, container: Int, s: Snapshot, max: Int, names: Boolean) =
+        chips(ctx, rv, container, s, s.people, max, names)
+
+    /** Where you are: tap a place to say you're there, tap it again to clear. */
+    private fun places(ctx: Context, rv: RemoteViews, container: Int, s: Snapshot, max: Int) =
+        chips(ctx, rv, container, s, s.places, max, names = true)
+
+    private fun chips(
+        ctx: Context,
+        rv: RemoteViews,
+        container: Int,
+        s: Snapshot,
+        items: List<Link>,
+        max: Int,
+        names: Boolean,
+    ) {
+        rv.removeAllViews(container)
+        val cur = s.cur
+        if (items.isEmpty() || cur == null || max <= 0) {
+            rv.setViewVisibility(container, View.GONE)
+            return
+        }
         rv.setViewVisibility(container, View.VISIBLE)
-        // People you're with stay visible even if there are more people than room.
-        val current = s.cur.people
-        s.people.sortedByDescending { it.id in current }.take(max).forEach { p ->
+        // The ones you've marked stay visible even if there are more than there's room for.
+        items.sortedByDescending { it.id in cur.links }.take(max).forEach { p ->
             val chip = RemoteViews(ctx.packageName, R.layout.chip)
-            val text = if (names) {
-                if (p.emoji.isBlank()) p.name else p.emoji + " " + p.name
-            } else {
-                p.badge
-            }
-            chip.setTextViewText(R.id.chip, text)
+            chip.setTextViewText(R.id.chip, if (names) p.label else p.badge)
             chip.setInt(R.id.chip, "setBackgroundResource",
-                if (p.id in current) R.drawable.slot_on else R.drawable.slot_off)
-            chip.setOnClickPendingIntent(R.id.chip, NowWidget.personIntent(ctx, p.id))
+                if (p.id in cur.links) R.drawable.slot_on else R.drawable.slot_off)
+            chip.setOnClickPendingIntent(R.id.chip, NowWidget.linkIntent(ctx, p.id))
             rv.addView(container, chip)
         }
     }
 
     private fun breakdown(ctx: Context, rv: RemoteViews, s: Snapshot, lines: Int) {
         rv.removeAllViews(R.id.breakdown)
-        if (s.today.isEmpty()) return
+        if (s.today.isEmpty() || lines <= 0) {
+            rv.setViewVisibility(R.id.breakdown, View.GONE)
+            return
+        }
         rv.setViewVisibility(R.id.breakdown, View.VISIBLE)
         s.today.take(lines).forEach { (a, ms) ->
             val row = RemoteViews(ctx.packageName, R.layout.breakdown_row)

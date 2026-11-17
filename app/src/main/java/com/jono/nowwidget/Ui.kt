@@ -5,32 +5,23 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.icu.text.BreakIterator
 import android.text.format.DateFormat
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
-import java.util.Calendar
+import com.jono.nowwidget.core.DiaryDay
+import com.jono.nowwidget.core.Mood
+import com.jono.nowwidget.core.Span
+import com.jono.nowwidget.core.levelFace
 import java.util.Date
 
 object Fmt {
-    fun startOfDay(ms: Long): Long {
-        val c = Calendar.getInstance()
-        c.timeInMillis = ms
-        c.set(Calendar.HOUR_OF_DAY, 0)
-        c.set(Calendar.MINUTE, 0)
-        c.set(Calendar.SECOND, 0)
-        c.set(Calendar.MILLISECOND, 0)
-        return c.timeInMillis
-    }
-
-    /** Next midnight, by the calendar, so days with a clock change come out right. */
-    fun addDays(dayStart: Long, days: Int): Long {
-        val c = Calendar.getInstance()
-        c.timeInMillis = dayStart
-        c.add(Calendar.DAY_OF_YEAR, days)
-        return c.timeInMillis
-    }
+    /** Start of today's diary day (4am to 4am). */
+    fun today(): Long = DiaryDay.start(System.currentTimeMillis())
 
     fun dur(ms: Long): String {
         val m = ms / 60_000L
@@ -47,7 +38,7 @@ object Fmt {
     fun day(ms: Long): String = DateFormat.format("EEE, MMM d", Date(ms)).toString()
 
     fun since(ctx: Context, start: Long): String {
-        val today = startOfDay(System.currentTimeMillis())
+        val today = today()
         val prefix = if (start < today) DateFormat.format("EEE ", Date(start)).toString() else ""
         return "since " + prefix + time(ctx, start)
     }
@@ -113,7 +104,7 @@ fun Context.statRow(label: String, ms: Long, total: Long, color: Int): View {
     return box
 }
 
-/** A day drawn left to right, midnight to midnight, in each activity's color. */
+/** A diary day drawn left to right, 4am to 4am, in each activity's color. */
 class RibbonView(ctx: Context) : View(ctx) {
     private val paint = Paint()
     private var spans: List<Span> = emptyList()
@@ -142,4 +133,96 @@ class RibbonView(ctx: Context) : View(ctx) {
             canvas.drawRect(a, 0f, b, h, paint)
         }
     }
+}
+
+fun moodFace(m: Mood?): String = if (m == null) "" else m.emoji.ifBlank { levelFace(m.level) }
+
+/** A rounded, tappable label that shows whether it's chosen. */
+fun Context.chip(label: String, on: Boolean, onTap: (TextView) -> Unit): TextView = TextView(this).apply {
+    text = label
+    textSize = 15f
+    gravity = Gravity.CENTER
+    setSingleLine(true)
+    setPadding(dp(12), dp(7), dp(12), dp(7))
+    setChipOn(this, on)
+    setOnClickListener { onTap(this) }
+}
+
+fun Context.setChipOn(v: View, on: Boolean) {
+    val accent = getColor(android.R.color.system_accent1_500)
+    val line = getColor(android.R.color.system_neutral2_400)
+    v.background = GradientDrawable().apply {
+        cornerRadius = dp(16).toFloat()
+        if (on) {
+            setColor((accent and 0x00FFFFFF) or (0x66 shl 24))
+            setStroke(dp(1), accent)
+        } else {
+            setColor(0x00000000)
+            setStroke(dp(1), (line and 0x00FFFFFF) or (0x88 shl 24))
+        }
+    }
+    v.isSelected = on
+}
+
+/** Lays its children out left to right, wrapping onto new lines, like a row of chips. */
+class WrapLayout(ctx: Context) : ViewGroup(ctx) {
+    private val gap = ctx.dp(6)
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val mode = MeasureSpec.getMode(widthMeasureSpec)
+        val maxW = if (mode == MeasureSpec.UNSPECIFIED) Int.MAX_VALUE
+        else MeasureSpec.getSize(widthMeasureSpec) - paddingLeft - paddingRight
+        val childSpec = MeasureSpec.makeMeasureSpec(
+            if (maxW == Int.MAX_VALUE) 0 else maxW,
+            if (maxW == Int.MAX_VALUE) MeasureSpec.UNSPECIFIED else MeasureSpec.AT_MOST,
+        )
+        var x = 0
+        var y = 0
+        var rowH = 0
+        var widest = 0
+        for (i in 0 until childCount) {
+            val c = getChildAt(i)
+            if (c.visibility == View.GONE) continue
+            c.measure(childSpec, MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED))
+            if (x > 0 && x + c.measuredWidth > maxW) {
+                x = 0
+                y += rowH + gap
+                rowH = 0
+            }
+            x += c.measuredWidth + gap
+            widest = maxOf(widest, x - gap)
+            rowH = maxOf(rowH, c.measuredHeight)
+        }
+        val w = if (mode == MeasureSpec.EXACTLY) MeasureSpec.getSize(widthMeasureSpec)
+        else minOf(widest, maxW) + paddingLeft + paddingRight
+        setMeasuredDimension(w, y + rowH + paddingTop + paddingBottom)
+    }
+
+    override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+        val maxW = r - l - paddingLeft - paddingRight
+        var x = 0
+        var y = 0
+        var rowH = 0
+        for (i in 0 until childCount) {
+            val c = getChildAt(i)
+            if (c.visibility == View.GONE) continue
+            if (x > 0 && x + c.measuredWidth > maxW) {
+                x = 0
+                y += rowH + gap
+                rowH = 0
+            }
+            c.layout(paddingLeft + x, paddingTop + y, paddingLeft + x + c.measuredWidth, paddingTop + y + c.measuredHeight)
+            x += c.measuredWidth + gap
+            rowH = maxOf(rowH, c.measuredHeight)
+        }
+    }
+}
+
+/** A small bold label above a group of chips. */
+fun Context.label(text: String): TextView = TextView(this).apply {
+    this.text = text
+    textSize = 13f
+    alpha = 0.7f
+    setTypeface(typeface, Typeface.BOLD)
+    setPadding(0, dp(12), 0, dp(4))
 }

@@ -6,18 +6,30 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.GridLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
+import com.jono.nowwidget.core.Act
+import com.jono.nowwidget.core.FeelingTag
+import com.jono.nowwidget.core.Link
+import com.jono.nowwidget.core.LinkKind
+import com.jono.nowwidget.core.Mood
+import com.jono.nowwidget.core.PALETTE
 
-/** Add, edit, reorder and remove activities or people. */
+/** Add, edit, reorder and remove activities, links (people, places, contexts), moods or feelings. */
 class ManageActivity : Activity() {
     private lateinit var list: LinearLayout
-    private val isActivities: Boolean get() = intent.getStringExtra(EXTRA_MODE) != MODE_PEOPLE
+    private lateinit var kindTabs: LinearLayout
+    private lateinit var addButton: Button
+    private lateinit var hint: TextView
+    private val mode: String get() = intent.getStringExtra(EXTRA_MODE) ?: MODE_ACTIVITIES
+    private var kind = LinkKind.PERSON
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -27,19 +39,40 @@ class ManageActivity : Activity() {
             setPadding(pad, pad * 2, pad, pad)
         }
         col.addView(TextView(this).apply {
-            text = if (isActivities) "Activities" else "People"
+            text = when (mode) {
+                MODE_LINKS -> "People, places and contexts"
+                MODE_MOODS -> "Moods"
+                MODE_TAGS -> "Feelings"
+                else -> "Activities"
+            }
             textSize = 24f
         })
-        col.addView(
-            note(
-                if (isActivities) "Tap one to edit it. Your order sets where its button goes."
-                else "On larger widgets and the expanded notification, tap someone to mark that you're with them."
-            )
-        )
-        col.addView(Button(this).apply {
-            text = if (isActivities) "Add activity" else "Add person"
-            setOnClickListener { if (isActivities) editAct(null) else editPerson(null) }
-        })
+        kindTabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        if (mode == MODE_LINKS) {
+            listOf(LinkKind.PERSON to "People", LinkKind.PLACE to "Places", LinkKind.CONTEXT to "Contexts").forEach { (k, label) ->
+                kindTabs.addView(Button(this).apply {
+                    text = label
+                    setOnClickListener {
+                        kind = k
+                        draw()
+                    }
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            }
+            col.addView(kindTabs)
+        }
+        hint = note("")
+        col.addView(hint)
+        addButton = Button(this).apply {
+            setOnClickListener {
+                when (mode) {
+                    MODE_LINKS -> editLink(null)
+                    MODE_MOODS -> editMood(null)
+                    MODE_TAGS -> editTag(null)
+                    else -> editAct(null)
+                }
+            }
+        }
+        col.addView(addButton)
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         col.addView(list)
         setContentView(ScrollView(this).apply { addView(col) })
@@ -48,18 +81,51 @@ class ManageActivity : Activity() {
 
     private fun draw() {
         list.removeAllViews()
-        if (isActivities) {
-            val items = Store.allActs(this).filter { !it.archived }
-            val ids = items.map { it.id }
-            items.forEachIndexed { i, a ->
-                val label = a.emoji + " " + a.name + if (a.show) "" else " (no button)"
-                list.addView(row(label, a.group, a.color, i, ids, "activity") { editAct(a) })
+        when (mode) {
+            MODE_LINKS -> {
+                val kinds = listOf(LinkKind.PERSON, LinkKind.PLACE, LinkKind.CONTEXT)
+                for (i in 0 until kindTabs.childCount) kindTabs.getChildAt(i).alpha = if (kinds[i] == kind) 1f else 0.55f
+                hint.text = when (kind) {
+                    LinkKind.PLACE -> "Where you are. Pick one in the 📝 box, the timeline, or on the biggest widget and the expanded panel."
+                    LinkKind.CONTEXT -> "What a stretch of time is part of, like a trip or an event. Pick one in the 📝 box or the timeline."
+                    else -> "On larger widgets and the expanded notification, tap someone to mark that you're with them."
+                }
+                addButton.text = "Add " + kindName(kind)
+                val items = Store.allLinks(this).filter { it.kind == kind && !it.archived }
+                val ids = items.map { it.id }
+                items.forEachIndexed { i, l ->
+                    list.addView(row(l.badge + " " + l.title, "", null, i, ids, "link") { editLink(l) })
+                }
             }
-        } else {
-            val items = Store.allPeople(this).filter { !it.archived }
-            val ids = items.map { it.id }
-            items.forEachIndexed { i, p ->
-                list.addView(row(p.badge + " " + p.name, "", null, i, ids, "person") { editPerson(p) })
+            MODE_MOODS -> {
+                hint.text = "The faces in the 📝 box, in this order. Level 1 is the best, 5 the worst; several moods can share a level."
+                addButton.text = "Add mood"
+                val items = Store.allMoods(this).filter { !it.archived }
+                val ids = items.map { it.id }
+                items.forEachIndexed { i, m ->
+                    list.addView(row(moodFace(m) + " " + m.name, "Level ${m.level}", null, i, ids, "mood") { editMood(m) })
+                }
+            }
+            MODE_TAGS -> {
+                hint.text = "Words for how you feel. The 📝 box shows the ones you use most first; \"+\" there adds one too."
+                addButton.text = "Add feeling"
+                val uses = Store.tagUses(this)
+                val items = Store.allTags(this).filter { !it.archived }
+                val ids = items.map { it.id }
+                items.forEachIndexed { i, t ->
+                    val n = uses[t.id] ?: 0
+                    list.addView(row(t.label, if (n == 0) "" else "Used $n times", null, i, ids, "feeling_tag") { editTag(t) })
+                }
+            }
+            else -> {
+                hint.text = "Tap one to edit it. Your order sets where its button goes."
+                addButton.text = "Add activity"
+                val items = Store.allActs(this).filter { !it.archived }
+                val ids = items.map { it.id }
+                items.forEachIndexed { i, a ->
+                    val label = a.emoji + " " + a.name + if (a.show) "" else " (no button)"
+                    list.addView(row(label, a.group, a.color, i, ids, "activity") { editAct(a) })
+                }
             }
         }
     }
@@ -137,11 +203,13 @@ class ManageActivity : Activity() {
         setSingleLine(true)
     }
 
+    private fun dialogBox() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(20), dp(8), dp(20), 0)
+    }
+
     private fun editAct(a: Act?) {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(8), dp(20), 0)
-        }
+        val box = dialogBox()
         val name = field("Name", a?.name ?: "")
         val emoji = field("Emoji", a?.emoji ?: "")
         val group = field("Group (like Work or Play)", a?.group ?: "")
@@ -199,13 +267,80 @@ class ManageActivity : Activity() {
         b.show()
     }
 
-    private fun editPerson(p: Person?) {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(8), dp(20), 0)
+    private fun editLink(l: Link?) {
+        val box = dialogBox()
+        val name = field("Name (as in your notes)", l?.title ?: "")
+        val emoji = field("Emoji (optional)", l?.emoji ?: "")
+        box.addView(name)
+        box.addView(emoji)
+        val kinds = LinkKind.ALL
+        val kindSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@ManageActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                listOf("Person", "Place", "Context"),
+            )
+            setSelection(kinds.indexOf(l?.kind ?: kind).coerceAtLeast(0))
         }
-        val name = field("Name", p?.name ?: "")
-        val emoji = field("Emoji (optional)", p?.emoji ?: "")
+        box.addView(kindSpinner)
+
+        val b = AlertDialog.Builder(this)
+            .setView(box)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save") { _, _ ->
+                val n = name.text.toString().trim()
+                if (n.isNotEmpty()) {
+                    val k = kinds.getOrElse(kindSpinner.selectedItemPosition) { kind }
+                    Store.saveLink(this, l?.id, n, k, Fmt.firstGrapheme(emoji.text.toString()))
+                    changed()
+                }
+            }
+        if (l != null) {
+            b.setNeutralButton("Remove") { _, _ ->
+                Store.archive(this, "link", l.id)
+                changed()
+            }
+        }
+        b.show()
+    }
+
+    private fun editMood(m: Mood?) {
+        val box = dialogBox()
+        val name = field("Name", m?.name ?: "")
+        val emoji = field("Face (emoji)", m?.emoji ?: "")
+        box.addView(name)
+        box.addView(emoji)
+        box.addView(label("Level"))
+        val levels = listOf("1 · best", "2", "3", "4", "5 · worst")
+        val levelSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@ManageActivity, android.R.layout.simple_spinner_dropdown_item, levels)
+            setSelection(((m?.level ?: 3) - 1).coerceIn(0, 4))
+        }
+        box.addView(levelSpinner)
+
+        val b = AlertDialog.Builder(this)
+            .setView(box)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save") { _, _ ->
+                val n = name.text.toString().trim()
+                if (n.isNotEmpty()) {
+                    Store.saveMood(this, m?.id, n, Fmt.firstGrapheme(emoji.text.toString()), levelSpinner.selectedItemPosition + 1)
+                    changed()
+                }
+            }
+        if (m != null) {
+            b.setNeutralButton("Remove") { _, _ ->
+                Store.archive(this, "mood", m.id)
+                changed()
+            }
+        }
+        b.show()
+    }
+
+    private fun editTag(t: FeelingTag?) {
+        val box = dialogBox()
+        val name = field("Name", t?.name ?: "")
+        val emoji = field("Emoji (optional)", t?.emoji ?: "")
         box.addView(name)
         box.addView(emoji)
 
@@ -215,13 +350,13 @@ class ManageActivity : Activity() {
             .setPositiveButton("Save") { _, _ ->
                 val n = name.text.toString().trim()
                 if (n.isNotEmpty()) {
-                    Store.savePerson(this, p?.id, n, Fmt.firstGrapheme(emoji.text.toString()))
+                    Store.saveTag(this, t?.id, n, Fmt.firstGrapheme(emoji.text.toString()))
                     changed()
                 }
             }
-        if (p != null) {
+        if (t != null) {
             b.setNeutralButton("Remove") { _, _ ->
-                Store.archive(this, "person", p.id)
+                Store.archive(this, "feeling_tag", t.id)
                 changed()
             }
         }
@@ -231,6 +366,8 @@ class ManageActivity : Activity() {
     companion object {
         const val EXTRA_MODE = "mode"
         const val MODE_ACTIVITIES = "activities"
-        const val MODE_PEOPLE = "people"
+        const val MODE_LINKS = "links"
+        const val MODE_MOODS = "moods"
+        const val MODE_TAGS = "tags"
     }
 }
