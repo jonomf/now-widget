@@ -8,7 +8,11 @@ data class VaultNote(val title: String, val kind: String, val aliases: List<Stri
  * optional frontmatter (`#person in [[Team]]`, `#place-com`, `#event`). Pure, so it's unit-tested.
  */
 object VaultNotes {
-    private val DATED = Regex("^\\d{4}-\\d{1,2}-\\d{1,2}")
+    private val DATE = "\\d{4}-\\d{1,2}-\\d{1,2}"
+    private val PLAIN_DAY = Regex("^$DATE$")
+    private val DAY_SUFFIX = Regex("^$DATE\\s*\\([^()]*\\)$")
+    private val DAY_TIME = Regex("^$DATE\\s+\\d{1,2}-\\d{2}$")
+    private val OURS = Regex("^$DATE\\s*\\(now\\)(\\s*\\(\\d+\\))?$")
     private val TRIP = Regex("\\btrips?\\b", RegexOption.IGNORE_CASE)
     private val TAG = Regex("^#([A-Za-z0-9_][A-Za-z0-9_/-]*)(?=\\s|$)")
     private val KEY = Regex("^(?i:alias(?:es)?)\\s*:\\s*(.*)$")
@@ -21,13 +25,23 @@ object VaultNotes {
     fun titleOf(fileName: String): String? =
         if (fileName.endsWith(".md", ignoreCase = true) && fileName.length > 3) fileName.dropLast(3) else null
 
-    /** Dated daily notes and the app's own `(now)` notes aren't things to link to. */
-    fun skip(title: String): Boolean = DATED.containsMatchIn(title) || title.trimEnd().endsWith("(now)")
+    /** A daily note's companion: `2025-4-9 (long)`, `(now)`, `(VRChat)`, or a time-stamped `2025-4-9 14-30`. */
+    fun isCompanion(title: String): Boolean {
+        val t = title.trim()
+        return DAY_SUFFIX.matches(t) || DAY_TIME.matches(t)
+    }
+
+    /**
+     * True when a note can never be linked to, whatever its tag, so its file isn't even opened: plain
+     * daily notes (`2025-4-9`) and the app's own `(now)` notes. Companions are read, since one that is
+     * tagged as an event is a context; `2025-4-9 -- Title` notes are ordinary notes.
+     */
+    fun skip(title: String): Boolean = PLAIN_DAY.matches(title.trim()) || OURS.matches(title.trim()) || title.trimEnd().endsWith("(now)")
 
     /** True when a file name could be a linkable note; the file need not be read otherwise. */
     fun candidate(fileName: String): Boolean = titleOf(fileName)?.let { !skip(it) } ?: false
 
-    /** Null when the file is skipped (not a note, dated, or one of ours). [head] is the note's first lines. */
+    /** Null when the file is skipped (not a note, a daily note, or one of ours). [head] is the note's first lines. */
     fun parse(fileName: String, head: List<String>): VaultNote? {
         val title = titleOf(fileName) ?: return null
         if (skip(title)) return null
@@ -44,14 +58,18 @@ object VaultNotes {
         }
         val tag = body.firstOrNull { it.isNotBlank() }?.trim()?.let { TAG.find(it)?.groupValues?.get(1)?.lowercase() }
         val aliases = aliases(front).filter { !it.equals(title, ignoreCase = true) }.distinctBy { it.lowercase() }
+        // A daily note's companion counts only when its tag says it's an event.
+        if (isCompanion(title) && !isEventTag(tag)) return null
         return VaultNote(title, kindOf(tag, title), aliases)
     }
+
+    private fun isEventTag(tag: String?): Boolean = tag == "event" || (tag != null && tag.startsWith("event-"))
 
     /** Person and place tags decide; events and trips are contexts; the rest are just notes. */
     fun kindOf(tag: String?, title: String): String = when {
         tag == "person" || tag == "person-official" -> LinkKind.PERSON
         tag == "place" || tag == "place-com" -> LinkKind.PLACE
-        tag == "event" || (tag != null && tag.startsWith("event-")) -> LinkKind.CONTEXT
+        isEventTag(tag) -> LinkKind.CONTEXT
         TRIP.containsMatchIn(title) -> LinkKind.CONTEXT
         else -> LinkKind.OTHER
     }

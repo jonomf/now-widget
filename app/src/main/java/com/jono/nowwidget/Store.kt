@@ -7,13 +7,17 @@ import android.database.SQLException
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.jono.nowwidget.core.Act
+import com.jono.nowwidget.core.BindLink
+import com.jono.nowwidget.core.BindNote
 import com.jono.nowwidget.core.Daylio
 import com.jono.nowwidget.core.DaylioData
 import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.Entry
 import com.jono.nowwidget.core.FeelingTag
 import com.jono.nowwidget.core.IDLE
+import com.jono.nowwidget.core.DirtyDays
 import com.jono.nowwidget.core.Link
+import com.jono.nowwidget.core.LinkBinding
 import com.jono.nowwidget.core.LinkEntry
 import com.jono.nowwidget.core.LinkIndex
 import com.jono.nowwidget.core.LinkKind
@@ -60,6 +64,11 @@ private val SEEDS = listOf(
  * that fails part way leaves version 1 exactly as it was, and a finished one never runs again.
  */
 private class Helper(ctx: Context) : SQLiteOpenHelper(ctx, "now.db", null, Schema.VERSION) {
+    /** WAL: the export's background reads never wait behind a write, and the first vault scan's chunks are cheap. */
+    override fun onConfigure(db: SQLiteDatabase) {
+        db.enableWriteAheadLogging()
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         Schema.create().forEach { db.execSQL(it) }
         SEEDS.forEachIndexed { i, s ->
@@ -92,7 +101,7 @@ data class ImportResult(
 class VaultUpsert(val docId: String, val name: String, val modified: Long, val note: VaultNote)
 
 /** What the scan already knows about a vault file. */
-class VaultCacheRow(val docId: String, val name: String, val modified: Long, val kind: String, val linkId: Long?)
+class VaultCacheRow(val docId: String, val name: String, val modified: Long, val kind: String, val linkId: Long?, val title: String)
 
 data class VaultMerge(val created: Int, val matched: Int, val removed: Int)
 
@@ -103,6 +112,9 @@ object Store {
     /** A change reaching further than this many diary days isn't marked past it; "Write all days" covers the rest. */
     private const val MAX_DIRTY_DAYS = 62
     private const val DAY_MS = 86_400_000L
+
+    /** Notes written per transaction by the vault scan. */
+    private const val VAULT_CHUNK = 200
 
     private var helper: Helper? = null
     private var lastTapAct = -1L
@@ -188,6 +200,8 @@ object Store {
                 d.update(table, v, "id=?", args(id))
             }
         }
+        // Links are written in your order, so a new order changes the notes already written.
+        if (table == "link") markWrittenDirty(ctx)
     }
 
     // --- Links: people, places, contexts ---
@@ -203,7 +217,7 @@ object Store {
             while (c.moveToNext()) uses[c.getLong(0)] = (uses[c.getLong(0)] ?: 0) + c.getInt(1)
         }
         val inVault = HashSet<Long>()
-        d.rawQuery("SELECT DISTINCT link_id FROM vault_note WHERE link_id IS NOT NULL", null).use { c ->
+        d.rawQuery("SELECT DISTINCT link_id FROM vault_note WHERE link_id IS NOT NULL UNION SELECT link_id FROM link_note", null).use { c ->
             while (c.moveToNext()) inVault.add(c.getLong(0))
         }
         val fromVault = HashSet<Long>()
@@ -850,19 +864,17 @@ object Store {
         val prev = d.rawQuery(StoreSql.PREV_ENTRY_START, args(ts)).use { c -> if (c.moveToFirst()) c.longOrNull(0) else null }
         val next = d.rawQuery(StoreSql.NEXT_ENTRY_START, args(ts)).use { c -> if (c.moveToFirst()) c.longOrNull(0) else null }
         val last = DiaryDay.start(maxOf(next ?: System.currentTimeMillis(), ts))
-        var day = DiaryDay.start(minOf(prev ?: ts, ts))
-        var n = 0
-        while (day <= last && n < MAX_DIRTY_DAYS) {
-            markDay(d, day)
-            day = DiaryDay.add(day, 1)
-            n++
-        }
+        val first = DiaryDay.start(minOf(prev ?: ts, ts))
+        DirtyDays.reach(DiaryDay.start(ts), first, last, MAX_DIRTY_DAYS).forEach { markDay(d, it) }
         ObsidianExport.changed(ctx)
     }
 
     /** A rename or regroup can change every note already written. */
     private fun markWrittenDirty(ctx: Context) {
-        db(ctx).execSQL(StoreSql.MARK_WRITTEN_DIRTY, arrayOf<Any>(OBSIDIAN, OBSIDIAN))
+        tx(ctx) { d ->
+            d.execSQL(StoreSql.MARK_WRITTEN_BUMP, arrayOf<Any>(OBSIDIAN, OBSIDIAN))
+            d.execSQL(StoreSql.MARK_WRITTEN_ADD, arrayOf<Any>(OBSIDIAN, OBSIDIAN))
+        }
         ObsidianExport.changed(ctx)
     }
 
@@ -875,25 +887,31 @@ object Store {
         markDay(db(ctx), dayStart)
     }
 
-    /** Day keys (`2025-4-9`) waiting to be written. */
-    fun dirtyDays(ctx: Context): List<String> {
-        val out = ArrayList<String>()
+    /** Day keys (`2025-4-9`) waiting to be written, each with its change counter. */
+    fun dirtyDays(ctx: Context): Map<String, Int> {
+        val out = LinkedHashMap<String, Int>()
         db(ctx).rawQuery(StoreSql.DIRTY_DAYS, args(OBSIDIAN)).use { c ->
-            while (c.moveToNext()) out.add(c.getString(0))
+            while (c.moveToNext()) out[c.getString(0)] = c.getInt(1)
         }
         return out
     }
 
-    fun clearDirty(ctx: Context, key: String) {
-        db(ctx).execSQL(StoreSql.CLEAR_DAY_DIRTY, arrayOf<Any>(OBSIDIAN, key))
-    }
+    /** The day's change counter: 0 when it's clean. */
+    fun dayGen(ctx: Context, key: String): Int =
+        db(ctx).rawQuery(StoreSql.DAY_GEN, args(OBSIDIAN, key)).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
 
-    fun markKeyDirty(ctx: Context, key: String) {
-        db(ctx).execSQL(StoreSql.MARK_DAY_DIRTY, arrayOf<Any>(OBSIDIAN, key))
+    /** Clears the dirty mark only if the day hasn't been marked again since it was at [gen]. */
+    fun clearDirtyIf(ctx: Context, key: String, gen: Int): Boolean {
+        val d = db(ctx)
+        d.execSQL(StoreSql.CLEAR_DAY_DIRTY, arrayOf<Any>(OBSIDIAN, key, gen))
+        return dayGen(ctx, key) == 0
     }
 
     fun exportHash(ctx: Context, key: String): String? =
         db(ctx).rawQuery(StoreSql.HASH_OF_DAY, args(OBSIDIAN, key)).use { c -> if (c.moveToFirst()) c.getString(0) else null }
+
+    fun exportDocId(ctx: Context, key: String): String? =
+        db(ctx).rawQuery(StoreSql.REMOTE_OF_DAY, args(OBSIDIAN, key)).use { c -> if (c.moveToFirst()) c.getString(0).ifEmpty { null } else null }
 
     fun saveExportHash(ctx: Context, key: String, remoteId: String, hash: String) {
         db(ctx).execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(OBSIDIAN, key, remoteId, hash, System.currentTimeMillis()))
@@ -942,7 +960,7 @@ object Store {
         val out = HashMap<String, VaultCacheRow>()
         db(ctx).rawQuery(StoreSql.VAULT_CACHE, null).use { c ->
             while (c.moveToNext()) {
-                out[c.getString(0)] = VaultCacheRow(c.getString(0), c.getString(1), c.getLong(2), c.getString(3), c.longOrNull(4))
+                out[c.getString(0)] = VaultCacheRow(c.getString(0), c.getString(1), c.getLong(2), c.getString(3), c.longOrNull(4), c.getString(5))
             }
         }
         return out
@@ -963,60 +981,121 @@ object Store {
     /** Forget the cache (and with it which links have notes). The links themselves stay. */
     fun clearVaultCache(ctx: Context) {
         db(ctx).execSQL("DELETE FROM vault_note")
+        db(ctx).execSQL(StoreSql.LINK_NOTES_CLEAR)
+    }
+
+    /** The titles of the notes that links are bound to by alias, by link id. */
+    fun boundNotes(ctx: Context): Map<Long, String> {
+        val out = HashMap<Long, String>()
+        db(ctx).rawQuery(StoreSql.LINK_NOTES, null).use { c ->
+            while (c.moveToNext()) out[c.getLong(0)] = c.getString(2)
+        }
+        return out
     }
 
     /**
-     * Merges what a scan found into the link table, in one transaction. A note whose title matches
-     * a link you already have (any case) is matched to it and the link is left exactly as it is;
-     * otherwise a new link is made and marked as made by the vault. Links are never archived or
-     * deleted here, whatever happened to the note.
+     * Merges what a scan found into the link table, a chunk of notes per transaction (the first scan
+     * has thousands). Per note, [LinkBinding.plan] decides: a note renamed in the vault (same document
+     * id, new name) renames the link that carried its old title; a title you already have (any case)
+     * is matched to that link and the link is left exactly as it is; otherwise a new link is made and
+     * marked as made by the vault. Then links that are one note's alias are bound to it. Links are
+     * never archived or deleted here, whatever happened to the note. Written notes that this could
+     * change (a retitle, a kind change, a new or changed binding) are marked dirty.
      */
-    fun applyVaultScan(ctx: Context, upserts: List<VaultUpsert>, removed: Collection<String>): VaultMerge = tx(ctx) { d ->
-        val cache = vaultCache(ctx)
+    fun applyVaultScan(ctx: Context, upserts: List<VaultUpsert>, removed: Collection<String>): VaultMerge {
+        val cache = HashMap(vaultCache(ctx))
         val links = allLinks(ctx)
-        val byTitle = HashMap<String, MutableList<LinkEntry>>()
-        links.forEach { l ->
-            byTitle.getOrPut(l.title.trim().lowercase(Locale.ROOT)) { ArrayList() }
-                .add(LinkEntry(l.id, l.title, l.kind, emptyList(), l.uses, l.archived, l.pinned))
-        }
+        val entries = ArrayList<LinkEntry>()
+        links.forEach { l -> entries.add(LinkEntry(l.id, l.title, l.kind, emptyList(), l.uses, l.archived, l.pinned)) }
         val scanMade = links.filter { it.fromVault }.associateBy { it.id }
         var pos = nextPos(ctx, "link")
         var created = 0
         var matched = 0
-        upserts.forEach { u ->
-            val n = u.note
-            val key = n.title.trim().lowercase(Locale.ROOT)
-            val found = LinkIndex.matchForNote(byTitle[key].orEmpty(), n.title, n.kind)
-            val linkId: Long
-            if (found == null) {
-                linkId = d.insertOrThrow("link", null, ContentValues().apply {
-                    put("title", n.title)
-                    put("kind", n.kind)
-                    put("emoji", "")
-                    put("pos", pos++)
-                    put("pinned", 0)
-                    put("archived", 0)
-                })
-                d.execSQL(StoreSql.LINK_SOURCE_ADD, arrayOf<Any>(linkId))
-                byTitle.getOrPut(key) { ArrayList() }.add(LinkEntry(linkId, n.title, n.kind, emptyList(), 0, false, false))
-                created++
-            } else {
-                linkId = found.id
-                matched++
-                // A scan-made link follows its note's tag while you haven't changed the kind yourself.
-                val old = cache[u.docId]
-                val made = scanMade[linkId]
-                if (old != null && made != null && old.kind != n.kind && made.kind == old.kind) {
-                    d.update("link", ContentValues().apply { put("kind", n.kind) }, "id=?", args(linkId))
+        var changed = false
+
+        upserts.chunked(VAULT_CHUNK).forEach { chunk ->
+            tx(ctx) { d ->
+                chunk.forEach { u ->
+                    val n = u.note
+                    val old = cache[u.docId]
+                    val plan = LinkBinding.plan(BindNote(u.docId, n.title, n.aliases), n.kind, old?.title, old?.linkId, entries)
+                    val linkId: Long
+                    when (plan) {
+                        is LinkBinding.Plan.Create -> {
+                            linkId = d.insertOrThrow("link", null, ContentValues().apply {
+                                put("title", n.title)
+                                put("kind", n.kind)
+                                put("emoji", "")
+                                put("pos", pos++)
+                                put("pinned", 0)
+                                put("archived", 0)
+                            })
+                            d.execSQL(StoreSql.LINK_SOURCE_ADD, arrayOf<Any>(linkId))
+                            entries.add(LinkEntry(linkId, n.title, n.kind, emptyList(), 0, false, false))
+                            created++
+                        }
+                        is LinkBinding.Plan.Rename -> {
+                            linkId = plan.linkId
+                            d.execSQL(StoreSql.VAULT_RETITLE, arrayOf<Any>(plan.newTitle, linkId))
+                            val i = entries.indexOfFirst { it.id == linkId }
+                            entries[i] = entries[i].copy(title = plan.newTitle)
+                            changed = true
+                            matched++
+                        }
+                        is LinkBinding.Plan.Match -> {
+                            linkId = plan.linkId
+                            matched++
+                        }
+                    }
+                    if (plan !is LinkBinding.Plan.Create) {
+                        // A scan-made link follows its note's tag while you haven't changed the kind yourself.
+                        val made = scanMade[linkId]
+                        if (old != null && made != null && old.kind != n.kind && made.kind == old.kind) {
+                            d.update("link", ContentValues().apply { put("kind", n.kind) }, "id=?", args(linkId))
+                            val i = entries.indexOfFirst { it.id == linkId }
+                            entries[i] = entries[i].copy(kind = n.kind)
+                            changed = true
+                        }
+                    }
+                    d.execSQL(
+                        StoreSql.VAULT_UPSERT,
+                        arrayOf<Any>(u.docId, u.name, u.modified, n.title, n.kind, VaultNotes.packAliases(n.aliases), linkId),
+                    )
+                    cache[u.docId] = VaultCacheRow(u.docId, u.name, u.modified, n.kind, linkId, n.title)
                 }
             }
-            d.execSQL(
-                StoreSql.VAULT_UPSERT,
-                arrayOf<Any>(u.docId, u.name, u.modified, n.title, n.kind, VaultNotes.packAliases(n.aliases), linkId),
-            )
         }
-        removed.forEach { d.execSQL(StoreSql.VAULT_DELETE, arrayOf<Any>(it)) }
-        VaultMerge(created, matched, removed.size)
+        removed.chunked(VAULT_CHUNK).forEach { chunk ->
+            tx(ctx) { d -> chunk.forEach { d.execSQL(StoreSql.VAULT_DELETE, arrayOf<Any>(it)) } }
+        }
+
+        if (rebindAliases(ctx, entries, scanMade.keys)) changed = true
+        if (changed) markWrittenDirty(ctx)
+        return VaultMerge(created, matched, removed.size)
+    }
+
+    /** Re-binds links to the notes that have them as an alias. True when the bindings changed. */
+    private fun rebindAliases(ctx: Context, entries: List<LinkEntry>, scanMade: Set<Long>): Boolean {
+        val notes = ArrayList<BindNote>()
+        val titles = HashMap<String, String>()
+        db(ctx).rawQuery(StoreSql.VAULT_NOTES, null).use { c ->
+            while (c.moveToNext()) {
+                notes.add(BindNote(c.getString(0), c.getString(1), VaultNotes.unpackAliases(c.getString(2))))
+                titles[c.getString(0)] = c.getString(1)
+            }
+        }
+        val want = LinkBinding.aliasBindings(entries.map { BindLink(it.id, it.title, it.archived, it.id in scanMade) }, notes)
+            .mapValues { (_, doc) -> doc to titles.getValue(doc) }
+        val now = HashMap<Long, Pair<String, String>>()
+        db(ctx).rawQuery(StoreSql.LINK_NOTES, null).use { c ->
+            while (c.moveToNext()) now[c.getLong(0)] = c.getString(1) to c.getString(2)
+        }
+        if (want == now) return false
+        tx(ctx) { d ->
+            d.execSQL(StoreSql.LINK_NOTES_CLEAR)
+            want.forEach { (linkId, b) -> d.execSQL(StoreSql.LINK_NOTE_SET, arrayOf<Any>(linkId, b.first, b.second)) }
+        }
+        return true
     }
 
     // --- Smart button order ---

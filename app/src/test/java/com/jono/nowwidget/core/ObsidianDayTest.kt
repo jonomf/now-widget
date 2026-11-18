@@ -218,6 +218,21 @@ class ObsidianDayTest {
     }
 
     @Test
+    fun aLinkBoundToANoteByAliasIsWrittenWithBothParts() {
+        assertEquals("[[Taehyun Kim|Tae]]", ObsidianDay.link("Tae", "Taehyun Kim"))
+        assertEquals("[[Tae]]", ObsidianDay.link("Tae", "Tae"))
+        assertEquals("[[Tae]]", ObsidianDay.link("Tae", null))
+        // If either part would break the link, the link's own title is plain text.
+        assertEquals("Tae", ObsidianDay.link("Tae", "Tae | Kim"))
+        assertEquals("Tae", ObsidianDay.link("Tae", "Tae #1"))
+        assertEquals("Tae", ObsidianDay.link("Tae", "[[Tae]]"))
+        assertEquals("Tae", ObsidianDay.link("Tae", "Kim]"))
+        assertEquals("Tae", ObsidianDay.link("Tae", ""))
+        assertEquals("a|b", ObsidianDay.link("a|b", "Note"))
+        assertEquals("[[Kim Two|Tae]]", ObsidianDay.link("Tae", "Kim\nTwo"))
+    }
+
+    @Test
     fun titlesThatWouldBreakALinkBecomePlainText() {
         assertEquals("[[Sam]]", ObsidianDay.link("Sam"))
         assertEquals("M4: The Plan", ObsidianDay.link("M4: The Plan").removePrefix("[[").removeSuffix("]]"))

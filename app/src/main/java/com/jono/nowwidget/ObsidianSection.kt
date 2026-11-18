@@ -171,6 +171,21 @@ class ObsidianSection(private val a: Activity) {
                 release(tree)
                 refresh()
             }
+            found.size == 1 && found[0].guessedNotes > 0 -> {
+                val v = found[0]
+                AlertDialog.Builder(a)
+                    .setTitle("Use this folder?")
+                    .setMessage(
+                        "\"" + v.name + "\" has no .obsidian folder that the phone can see, but it holds " +
+                            v.guessedNotes + " notes. Use it as the vault?"
+                    )
+                    .setNegativeButton("Cancel") { _, _ ->
+                        release(tree)
+                        refresh()
+                    }
+                    .setPositiveButton("Use it") { _, _ -> use(tree, v) }
+                    .show()
+            }
             found.size == 1 -> use(tree, found[0])
             else -> {
                 val names = found.map { it.name }.toTypedArray<CharSequence>()
@@ -188,20 +203,26 @@ class ObsidianSection(private val a: Activity) {
 
     private fun use(tree: Uri, vault: VaultFile) {
         val before = Prefs.vaultTree(a)
-        if (before != null && before != tree.toString()) release(Uri.parse(before))
         // A different vault: what was written and indexed before doesn't apply to it.
         if (before != tree.toString() || Prefs.vaultRoot(a) != vault.docId) {
             Store.clearExportState(a)
             Store.clearVaultCache(a)
         }
         Prefs.setVault(a, tree.toString(), vault.docId, vault.name)
+        // The old folder is let go only once the new one is the setup (release never lets go of the one in use).
+        if (before != null && before != tree.toString()) release(Uri.parse(before))
         Prefs.setVaultError(a, "")
         Prefs.setVaultScanError(a, "")
         refresh()
         ObsidianExport.startUp(a)
     }
 
+    /**
+     * Lets go of a folder permission, except the one the current setup uses: cancelling a dialog or
+     * picking the same folder again must leave it working.
+     */
     private fun release(tree: Uri) {
+        if (tree.toString() == Prefs.vaultTree(a)) return
         try {
             a.contentResolver.releasePersistableUriPermission(
                 tree, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
@@ -224,8 +245,9 @@ class ObsidianSection(private val a: Activity) {
             .setMessage("Stop writing notes and let go of the vault folder? Notes already written stay where they are.")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Stop") { _, _ ->
-                Prefs.vaultTree(a)?.let { release(Uri.parse(it)) }
+                val held = Prefs.vaultTree(a)
                 Prefs.setVault(a, null, null, "")
+                held?.let { release(Uri.parse(it)) }
                 Prefs.setVaultError(a, "")
                 Prefs.setVaultScanError(a, "")
                 Store.clearExportState(a)

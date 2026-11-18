@@ -226,11 +226,24 @@ def test_export_days():
         db.execute(SQL['MARK_DAY_DIRTY'], ('obsidian', d))
     db.execute(SQL['MARK_DAY_DIRTY'], ('obsidian', '2025-4-9'))  # again: still one row
     check(one(db, "SELECT COUNT(*) FROM export_day WHERE target = 'obsidian'") == 2, 'marking a day twice keeps one row')
-    check(sorted(r[0] for r in db.execute(SQL['DIRTY_DAYS'], ('obsidian',))) == ['2025-4-10', '2025-4-9'], 'both dirty')
-    db.execute(SQL['CLEAR_DAY_DIRTY'], ('obsidian', '2025-4-9'))
+    dirty = dict(db.execute(SQL['DIRTY_DAYS'], ('obsidian',)).fetchall())
+    check(dirty == {'2025-4-10': 1, '2025-4-9': 2}, f'both dirty, with their change counters: {dirty}')
+    check(one(db, SQL['DAY_GEN'], ('obsidian', '2025-4-9')) == 2, 'the counter is readable')
+    check(one(db, SQL['DAY_GEN'], ('obsidian', '2099-1-1')) is None, 'a day never marked has no counter')
+
+    # The write protocol's clear: only if the day wasn't marked again since the counter was read.
+    gen = one(db, SQL['DAY_GEN'], ('obsidian', '2025-4-9'))
+    db.execute(SQL['MARK_DAY_DIRTY'], ('obsidian', '2025-4-9'))  # a change lands during the write
+    db.execute(SQL['CLEAR_DAY_DIRTY'], ('obsidian', '2025-4-9', gen))
+    check(one(db, SQL['DAY_GEN'], ('obsidian', '2025-4-9')) == 3, 'a change during the write keeps the day dirty')
+    db.execute(SQL['CLEAR_DAY_DIRTY'], ('obsidian', '2025-4-9', 3))
     check([r[0] for r in db.execute(SQL['DIRTY_DAYS'], ('obsidian',))] == ['2025-4-10'], 'cleared one')
+    check(one(db, SQL['DAY_GEN'], ('obsidian', '2025-4-9')) == 0, 'a cleared day reads as 0')
     db.execute(SQL['MARK_DAY_DIRTY'], ('obsidian', '2025-4-9'))  # a change after the clear dirties it again
     check(len(db.execute(SQL['DIRTY_DAYS'], ('obsidian',)).fetchall()) == 2, 'a change after the write marks it dirty again')
+    check(one(db, SQL['DAY_GEN'], ('obsidian', '2025-4-9')) == 1, 'and starts a new count')
+    # A blanked hash keeps the document id (an interrupted write is recognised later).
+    check(one(db, SQL['REMOTE_OF_DAY'], ('obsidian', '2025-4-9')) is None, 'no document id before the first write')
 
     # Hashes: saved per target and day, replaced on a new write.
     check(one(db, SQL['HASH_OF_DAY'], ('obsidian', '2025-4-9')) is None, 'no hash before the first write')
@@ -243,11 +256,20 @@ def test_export_days():
     # A rename dirties only the days already written, for this target only.
     db.execute("INSERT INTO export_day (target, day, dirty) VALUES ('obsidian', '2025-1-1', 0), ('calendar', '2025-4-9', 0)")
     db.execute(SQL['SAVE_HASH'], ('obsidian', '2025-1-1', 'doc0', 'h0', 5))
-    db.execute(SQL['CLEAR_DAY_DIRTY'], ('obsidian', '2025-4-9'))
-    db.execute(SQL['CLEAR_DAY_DIRTY'], ('obsidian', '2025-4-10'))
-    db.execute(SQL['MARK_WRITTEN_DIRTY'], ('obsidian', 'obsidian'))
+    db.execute(SQL['SAVE_HASH'], ('obsidian', '2025-4-9', 'doc1', '', 25))  # blanked, as the protocol does
+    check(one(db, SQL['REMOTE_OF_DAY'], ('obsidian', '2025-4-9')) == 'doc1' and one(db, SQL['HASH_OF_DAY'], ('obsidian', '2025-4-9')) == '',
+          'a blanked hash keeps the document id')
+    db.execute(SQL['CLEAR_DAY_DIRTY'], ('obsidian', '2025-4-9', 1))
+    db.execute(SQL['CLEAR_DAY_DIRTY'], ('obsidian', '2025-4-10', 1))
+    db.execute(SQL['MARK_WRITTEN_BUMP'], ('obsidian', 'obsidian'))
+    db.execute(SQL['MARK_WRITTEN_ADD'], ('obsidian', 'obsidian'))
     check(sorted(r[0] for r in db.execute(SQL['DIRTY_DAYS'], ('obsidian',))) == ['2025-1-1', '2025-4-9'],
           'only days that have a written note become dirty')
+    # A day already dirty keeps counting (a write in flight can't clear it).
+    g = one(db, SQL['DAY_GEN'], ('obsidian', '2025-1-1'))
+    db.execute(SQL['MARK_WRITTEN_BUMP'], ('obsidian', 'obsidian'))
+    db.execute(SQL['MARK_WRITTEN_ADD'], ('obsidian', 'obsidian'))
+    check(one(db, SQL['DAY_GEN'], ('obsidian', '2025-1-1')) == g + 1, 'a rename during a write bumps the counter')
     check(one(db, "SELECT dirty FROM export_day WHERE target = 'calendar'") == 0, "another target's days are left alone")
 
 
@@ -278,7 +300,8 @@ def test_vault_index():
     db.execute(SQL['VAULT_UPSERT'], up)
     db.execute(SQL['VAULT_UPSERT'], ('doc2', 'Tartine.md', 7, 'Tartine', 'place', '', 2))
     db.execute(SQL['VAULT_UPSERT'], ('doc3', 'Loose.md', 8, 'Loose', 'other', 'Alias', None))
-    check(len(db.execute(SQL['VAULT_CACHE']).fetchall()) == 3, 'three cached notes')
+    cache = {r[0]: r for r in db.execute(SQL['VAULT_CACHE']).fetchall()}
+    check(len(cache) == 3 and cache['doc1'][5] == 'Sam' and cache['doc3'][4] is None, 'three cached notes, with their titles')
     db.execute(SQL['VAULT_UPSERT'], ('doc1', 'Sam.md', 6, 'Sam', 'person', 'Sammy\nS\nSamuel', 1))
     check(one(db, "SELECT COUNT(*) FROM vault_note") == 3 and one(db, "SELECT modified FROM vault_note WHERE doc_id = 'doc1'") == 6,
           'a changed note replaces its row')
@@ -292,6 +315,46 @@ def test_vault_index():
     check(one(db, "SELECT COUNT(*) FROM link_source WHERE source = 'vault'") == 1, 'a link is marked as scan-made once')
 
 
+def test_alias_and_rename_sql():
+    db = fresh_v2()
+    db.execute("INSERT INTO link (id, title, kind) VALUES (1, 'Tae', 'person'), (2, 'Old Cafe', 'place')")
+    db.execute(SQL['VAULT_UPSERT'], ('d1', 'Taehyun Kim.md', 1, 'Taehyun Kim', 'person', 'Tae\nT', 3))
+    db.execute(SQL['LINK_NOTE_SET'], (1, 'd1', 'Taehyun Kim'))
+    check(db.execute(SQL['LINK_NOTES']).fetchall() == [(1, 'd1', 'Taehyun Kim')], 'a link is bound to its note')
+    db.execute(SQL['LINK_NOTE_SET'], (1, 'd1', 'Tae Kim'))  # the note was renamed
+    check(db.execute(SQL['LINK_NOTES']).fetchall() == [(1, 'd1', 'Tae Kim')], 'a binding is replaced, not doubled')
+    check(len(db.execute(SQL['VAULT_NOTES']).fetchall()) == 1, 'notes come back for re-binding')
+    db.execute(SQL['LINK_NOTES_CLEAR'])
+    check(db.execute(SQL['LINK_NOTES']).fetchall() == [], 'bindings clear')
+    db.execute(SQL['VAULT_UPSERT'], ('d2', 'Old Cafe.md', 1, 'Old Cafe', 'place', '', 2))
+    db.execute(SQL['VAULT_UPSERT'], ('d2', 'New Cafe.md', 2, 'New Cafe', 'place', '', 2))  # same document, new name
+    db.execute(SQL['VAULT_RETITLE'], ('New Cafe', 2))
+    check(one(db, 'SELECT title FROM link WHERE id = 2') == 'New Cafe' and one(db, 'SELECT COUNT(*) FROM link') == 2,
+          'a renamed note retitles its link and makes no new one')
+    check(one(db, "SELECT COUNT(*) FROM vault_note WHERE doc_id = 'd2'") == 1, 'and keeps one row per document')
+
+
+def test_v2_links_stay_chips_after_a_scan():
+    """Hand-made people and places from a v2 database aren't touched or marked by the vault merge (mirrors Store.applyVaultScan)."""
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    db = tm.make_v2(tmp + '/v2.db')
+    check(tm.open_helper(db) == 'upgraded', 'v2 upgrade ran')
+    before = db.execute('SELECT id, title, kind, emoji, pos, pinned, archived FROM link ORDER BY id').fetchall()
+    chips = lambda: sorted(r[0] for r in db.execute('SELECT id FROM link WHERE id NOT IN (SELECT link_id FROM link_source)'))
+    check(chips() == sorted(r[0] for r in before), 'every v2 link is a chip before a scan')
+    by_title = {r[1].lower(): r[0] for r in before}
+    # The scan finds notes for Sam, The Loft and Dulce (matched: the link is used as is) and one new note.
+    for doc, title, kind in (('a', 'Sam', 'person'), ('b', 'The Loft', 'place'), ('c', 'Dulce', 'person')):
+        db.execute(SQL['VAULT_UPSERT'], (doc, title + '.md', 1, title, kind, '', by_title[title.lower()]))
+    db.execute("INSERT INTO link (title, kind) VALUES ('Newcomer', 'person')")
+    new_id = one(db, "SELECT id FROM link WHERE title = 'Newcomer'")
+    db.execute(SQL['LINK_SOURCE_ADD'], (new_id,))
+    after = db.execute('SELECT id, title, kind, emoji, pos, pinned, archived FROM link WHERE id <> ? ORDER BY id', (new_id,)).fetchall()
+    check(after == before, 'matching notes leave the hand-made links exactly as they were')
+    check(new_id not in chips() and all(r[0] in chips() for r in before), 'only the scan-made link is off the chips')
+
+
 def main():
     test_delete_detaches()
     test_sticky_context()
@@ -299,10 +362,12 @@ def main():
     test_export_days()
     test_change_reach()
     test_vault_index()
+    test_alias_and_rename_sql()
+    test_v2_links_stay_chips_after_a_scan()
     print(f'{len(failures)} failures' if failures else
           f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; '
           'import dedupe (re-import, same-minute notes, native feelings); rollback on failure; '
-          'export dirty days and hashes; change reach; vault cache')
+          'export dirty days, change counters and hashes; change reach; vault cache; alias binding and rename; v2 links stay chips')
     sys.exit(1 if failures else 0)
 
 

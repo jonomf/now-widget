@@ -9,7 +9,7 @@ package com.jono.nowwidget.core
  *
  * Version 2 is additive: the v1 tables `person`, `entry_person` and the column `entry.note` stay as
  * they were (copied out, then no longer used), so nothing a v1 install wrote is ever rewritten.
- * Version 3 is two new tables for the Obsidian vault index and changes nothing that exists.
+ * Version 3 is three new tables for the Obsidian vault index and changes nothing that exists.
  */
 object Schema {
     const val VERSION = 3
@@ -54,13 +54,16 @@ object Schema {
      * Tables new in version 3. `vault_note` is a cache of the vault's root notes (one row per file,
      * [link_id] the link it was matched with); `link_source` marks the links the vault scan created,
      * so the owner's hand-made links are never touched and scan-made ones stay off the widget chips
-     * until they're pinned or used.
+     * until they're pinned or used. `link_note` binds a link to the one note that has it as an alias
+     * (its title is on the link, so the note can be written as `[[Note Title|Link title]]`).
      */
     // BEGIN NEW_IN_V3
     val NEW_IN_V3: List<String> = listOf(
         "CREATE TABLE vault_note (doc_id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, modified INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL, kind TEXT NOT NULL, aliases TEXT NOT NULL DEFAULT '', link_id INTEGER)",
         "CREATE INDEX vault_note_link ON vault_note (link_id)",
         "CREATE TABLE link_source (link_id INTEGER PRIMARY KEY NOT NULL, source TEXT NOT NULL)",
+        "CREATE TABLE link_note (link_id INTEGER PRIMARY KEY NOT NULL, doc_id TEXT NOT NULL, note_title TEXT NOT NULL)",
+        "CREATE INDEX link_note_doc ON link_note (doc_id)",
     )
     // END NEW_IN_V3
 

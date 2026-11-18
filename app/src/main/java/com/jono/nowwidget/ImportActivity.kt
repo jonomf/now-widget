@@ -27,8 +27,15 @@ class ImportActivity : Activity() {
     private lateinit var status: TextView
     /** Everything below the status line: the mapping and results. Cleared for each new file. */
     private lateinit var body: LinearLayout
-    private val rows = ArrayList<Pair<Long, Spinner>>()
-    private var choices: List<Pair<String, (String) -> TagTarget>> = emptyList()
+    /** One line of the mapping screen: a tag, its spinner and the choices that spinner has (a "Find…" pick adds to them). */
+    private class Row(
+        val id: Long,
+        val spinner: Spinner,
+        val choices: MutableList<Pair<String, (String) -> TagTarget>>,
+        val adapter: ArrayAdapter<String>,
+    )
+
+    private val rows = ArrayList<Row>()
     @Volatile private var busy = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -152,12 +159,17 @@ class ImportActivity : Activity() {
             if (known) m.name else m.name + " (new, level ${m.level ?: 3})"
         }))
 
-        // Every choice a tag can have; the function turns the tag's name into a target.
+        // The choices every tag has. Only links that are chips are listed (the vault's thousands of notes
+        // aren't); "Find…" searches all of them, and a link the guess picks is added to its own row.
         val liveActs = acts.filter { !it.archived }
         val liveLinks = links.filter { !it.archived && (it.kind == LinkKind.PERSON || it.kind == LinkKind.PLACE) }
-        val list = ArrayList<Pair<String, (String) -> TagTarget>>()
+        val base = ArrayList<Pair<String, (String) -> TagTarget>>()
         fun choice(label: String, f: (String) -> TagTarget) {
-            list.add(Pair(label, f))
+            base.add(Pair(label, f))
+        }
+        fun linkChoice(l: com.jono.nowwidget.core.Link) {
+            val kindLabel = if (l.kind == LinkKind.PLACE) "Place" else "Person"
+            choice("$kindLabel: ${l.title}") { TagTarget.ToLink(l.id, l.kind, l.title) }
         }
         choice("Feeling") { TagTarget.Feeling }
         choice("Skip") { TagTarget.Skip }
@@ -165,15 +177,11 @@ class ImportActivity : Activity() {
         choice("New person") { n -> TagTarget.ToLink(null, LinkKind.PERSON, n) }
         choice("New place") { n -> TagTarget.ToLink(null, LinkKind.PLACE, n) }
         liveActs.forEach { a -> choice("Activity: ${a.emoji} ${a.name}") { TagTarget.ToActivity(a.id, a.name) } }
-        liveLinks.forEach { l ->
-            val kindLabel = if (l.kind == LinkKind.PLACE) "Place" else "Person"
-            choice("$kindLabel: ${l.title}") { TagTarget.ToLink(l.id, l.kind, l.title) }
-        }
-        choices = list
-        val labels = list.map { it.first }
+        liveLinks.filter { it.chip }.forEach { linkChoice(it) }
+        choice(FIND) { TagTarget.Skip }
 
         body.addView(heading("Daylio activities"))
-        body.addView(note("Most of yours are what you were doing or who with. Send each one to a feeling, a Now activity, a person or a place. Ones sent to an activity, person or place are kept on the check-in; they never become time spans."))
+        body.addView(note("Most of yours are what you were doing or who with. Send each one to a feeling, a Now activity, a person or a place (\"Find…\" searches all your people and places). Ones sent to an activity, person or place are kept on the check-in; they never become time spans."))
         val uses = data.uses()
         data.tags.sortedByDescending { uses[it.id] ?: 0 }.forEach { t ->
             val row = LinearLayout(this).apply {
@@ -185,13 +193,49 @@ class ImportActivity : Activity() {
                 textSize = 16f
                 setTypeface(typeface, Typeface.BOLD)
             })
-            val spinner = Spinner(this).apply {
-                adapter = ArrayAdapter(this@ImportActivity, android.R.layout.simple_spinner_dropdown_item, labels)
-                setSelection(defaultChoice(Daylio.guess(t.name, liveActs, liveLinks)))
+            val mine = ArrayList(base)
+            val guess = Daylio.guess(t.name, liveActs, liveLinks)
+            var at = mine.indexOfFirst { it.second("") == guess }
+            if (at < 0 && guess is TagTarget.ToLink && guess.id != null) {
+                liveLinks.firstOrNull { it.id == guess.id }?.let { l ->
+                    val kindLabel = if (l.kind == LinkKind.PLACE) "Place" else "Person"
+                    mine.add(mine.size - 1, Pair<String, (String) -> TagTarget>("$kindLabel: ${l.title}") { _ -> TagTarget.ToLink(l.id, l.kind, l.title) })
+                    at = mine.size - 2
+                }
+            }
+            val adapter = ArrayAdapter(this@ImportActivity, android.R.layout.simple_spinner_dropdown_item, mine.map { it.first }.toMutableList())
+            val spinner = Spinner(this)
+            spinner.adapter = adapter
+            spinner.setSelection(at.coerceAtLeast(0))
+            val line = Row(t.id, spinner, mine, adapter)
+            var last = spinner.selectedItemPosition
+            spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(p: android.widget.AdapterView<*>?, v: android.view.View?, pos: Int, id: Long) {
+                    if (mine[pos].first != FIND) {
+                        last = pos
+                        return
+                    }
+                    spinner.setSelection(last)
+                    pickLink("Find a person or place", setOf(LinkKind.PERSON, LinkKind.PLACE), LinkKind.PERSON) { linkId ->
+                        val l = Store.allLinks(this@ImportActivity).firstOrNull { it.id == linkId } ?: return@pickLink
+                        val kindLabel = if (l.kind == LinkKind.PLACE) "Place" else "Person"
+                        val label = "$kindLabel: ${l.title}"
+                        var i = mine.indexOfFirst { it.first == label }
+                        if (i < 0) {
+                            mine.add(mine.size - 1, Pair<String, (String) -> TagTarget>(label) { _ -> TagTarget.ToLink(l.id, l.kind, l.title) })
+                            adapter.insert(label, mine.size - 2)
+                            i = mine.size - 2
+                        }
+                        last = i
+                        spinner.setSelection(i)
+                    }
+                }
+
+                override fun onNothingSelected(p: android.widget.AdapterView<*>?) {}
             }
             row.addView(spinner)
             body.addView(row)
-            rows.add(t.id to spinner)
+            rows.add(line)
         }
 
         val go = Button(this).apply { text = "Import ${data.entries.size} check-ins" }
@@ -199,21 +243,18 @@ class ImportActivity : Activity() {
             if (busy) return@setOnClickListener
             busy = true
             go.isEnabled = false
-            rows.forEach { it.second.isEnabled = false }
+            rows.forEach { it.spinner.isEnabled = false }
             runImport(data)
         }
         body.addView(go)
     }
 
-    /** Where Daylio.guess's answer sits in the choices list. */
-    private fun defaultChoice(g: TagTarget): Int = choices.indexOfFirst { it.second("") == g }.coerceAtLeast(0)
-
     private fun runImport(data: DaylioData) {
         val names = data.tags.associate { it.id to it.name }
         val targets = HashMap<Long, TagTarget>()
-        rows.forEach { (id, spinner) ->
-            val choice = choices.getOrNull(spinner.selectedItemPosition) ?: choices[0]
-            targets[id] = choice.second(names[id] ?: "")
+        rows.forEach { r ->
+            val choice = r.choices.getOrNull(r.spinner.selectedItemPosition)?.takeIf { it.first != FIND } ?: r.choices[0]
+            targets[r.id] = choice.second(names[r.id] ?: "")
         }
         val total = data.entries.size
         status.text = "Importing $total check-ins…"
@@ -256,6 +297,7 @@ class ImportActivity : Activity() {
 
     companion object {
         private const val REQUEST_PICK = 5
+        private const val FIND = "Find…"
         private const val MAX_BYTES = 20L * 1024 * 1024
     }
 }

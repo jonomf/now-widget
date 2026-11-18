@@ -32,14 +32,21 @@ object StoreSql {
     const val INSERT_MOMENT_TAG = "INSERT INTO moment_tag (moment_id, tag_id) VALUES (?, ?)"
     const val INSERT_MOMENT_REF = "INSERT OR IGNORE INTO moment_ref (moment_id, kind, ref_id) VALUES (?, ?, ?)"
 
-    /** Obsidian export: a diary day is dirty after anything changes in it (target, day). */
-    const val MARK_DAY_DIRTY = "INSERT OR REPLACE INTO export_day (target, day, dirty) VALUES (?, ?, 1)"
-    const val CLEAR_DAY_DIRTY = "UPDATE export_day SET dirty = 0 WHERE target = ? AND day = ?"
-    const val DIRTY_DAYS = "SELECT day FROM export_day WHERE target = ? AND dirty = 1"
+    /**
+     * Obsidian export: `dirty` is a change counter. 0 is clean; every change adds one (target, day).
+     * A write reads the counter first and clears it only if it is still the same afterwards, so a
+     * change that lands during the write keeps the day dirty. (Rows from before the counter hold 0 or 1.)
+     */
+    const val MARK_DAY_DIRTY = "INSERT INTO export_day (target, day, dirty) VALUES (?, ?, 1) ON CONFLICT (target, day) DO UPDATE SET dirty = dirty + 1"
+    const val DAY_GEN = "SELECT dirty FROM export_day WHERE target = ? AND day = ?"
+    const val CLEAR_DAY_DIRTY = "UPDATE export_day SET dirty = 0 WHERE target = ? AND day = ? AND dirty = ?"
+    const val DIRTY_DAYS = "SELECT day, dirty FROM export_day WHERE target = ? AND dirty > 0"
 
-    /** A rename or regroup can change every note already written: all of them become dirty (target, target). */
-    const val MARK_WRITTEN_DIRTY = "INSERT OR REPLACE INTO export_day (target, day, dirty) SELECT ?, local_key, 1 FROM export_state WHERE target = ?"
+    /** A rename or regroup can change every note already written: all of them become dirty (target, target), then (target, target). */
+    const val MARK_WRITTEN_BUMP = "UPDATE export_day SET dirty = dirty + 1 WHERE target = ? AND day IN (SELECT local_key FROM export_state WHERE target = ?)"
+    const val MARK_WRITTEN_ADD = "INSERT OR IGNORE INTO export_day (target, day, dirty) SELECT ?, local_key, 1 FROM export_state WHERE target = ?"
     const val HASH_OF_DAY = "SELECT content_hash FROM export_state WHERE target = ? AND local_key = ?"
+    const val REMOTE_OF_DAY = "SELECT remote_id FROM export_state WHERE target = ? AND local_key = ?"
     const val SAVE_HASH = "INSERT OR REPLACE INTO export_state (target, local_key, remote_id, content_hash, synced_at) VALUES (?, ?, ?, ?, ?)"
 
     /** The entry just before and just after a time (ts, ts): which days a change at ts can reach. */
@@ -47,10 +54,15 @@ object StoreSql {
     const val NEXT_ENTRY_START = "SELECT MIN(start_ms) FROM entry WHERE start_ms > ?"
 
     /** Vault index: the cache, and how scan-made links are marked. */
-    const val VAULT_CACHE = "SELECT doc_id, name, modified, kind, link_id FROM vault_note"
+    const val VAULT_CACHE = "SELECT doc_id, name, modified, kind, link_id, title FROM vault_note"
     const val VAULT_UPSERT = "INSERT OR REPLACE INTO vault_note (doc_id, name, modified, title, kind, aliases, link_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
     const val VAULT_DELETE = "DELETE FROM vault_note WHERE doc_id = ?"
     const val VAULT_ALIASES = "SELECT link_id, aliases FROM vault_note WHERE link_id IS NOT NULL AND aliases <> ''"
+    const val VAULT_NOTES = "SELECT doc_id, title, aliases FROM vault_note"
+    const val VAULT_RETITLE = "UPDATE link SET title = ? WHERE id = ?"
+    const val LINK_NOTES = "SELECT link_id, doc_id, note_title FROM link_note"
+    const val LINK_NOTES_CLEAR = "DELETE FROM link_note"
+    const val LINK_NOTE_SET = "INSERT OR REPLACE INTO link_note (link_id, doc_id, note_title) VALUES (?, ?, ?)"
     const val LINK_SOURCE_ADD = "INSERT OR IGNORE INTO link_source (link_id, source) VALUES (?, 'vault')"
     const val LINK_USES = "SELECT link_id, COUNT(*) FROM entry_link GROUP BY link_id"
     const val CONTEXT_USES = "SELECT context_id, COUNT(*) FROM entry WHERE context_id IS NOT NULL GROUP BY context_id"

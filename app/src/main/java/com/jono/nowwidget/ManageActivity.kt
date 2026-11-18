@@ -94,9 +94,13 @@ class ManageActivity : Activity() {
                 val items = Store.allLinks(this).filter { it.kind == kind && !it.archived }
                 val ids = items.map { it.id }
                 val vault = ObsidianExport.configured(this)
+                val bound = if (vault) Store.boundNotes(this) else emptyMap()
                 items.forEachIndexed { i, l ->
                     val sub = listOfNotNull(
-                        if (vault) (if (l.inVault) "note in your vault" else "no note yet") else null,
+                        if (!vault) null
+                        else if (bound[l.id] != null) "note \"" + bound[l.id] + "\" (by alias)"
+                        else if (l.inVault) "note in your vault"
+                        else "no note yet",
                         if (l.fromVault && !l.chip) "not on the widget" else null,
                     ).joinToString(" · ")
                     list.addView(row(l.badge + " " + l.title, sub, null, i, ids, "link") { editLink(l) })

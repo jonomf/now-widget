@@ -251,7 +251,7 @@ def make_v2(path):
     return db
 
 
-NEW_V3_TABLES = ('vault_note', 'link_source')
+NEW_V3_TABLES = ('vault_note', 'link_source', 'link_note')
 
 
 def check_fresh_equals(db, label):
@@ -297,6 +297,10 @@ def check_new_tables_work(db, label):
     check(rows(db, 'SELECT COUNT(*) FROM link_source') == [(1,)], f'{label}: link_source marks a link once')
     db.execute('DELETE FROM vault_note')
     db.execute('DELETE FROM link_source')
+    db.execute("INSERT OR REPLACE INTO link_note (link_id, doc_id, note_title) VALUES (1, 'd1', 'Samuel')")
+    db.execute("INSERT OR REPLACE INTO link_note (link_id, doc_id, note_title) VALUES (1, 'd1', 'Sam Q')")
+    check(rows(db, 'SELECT COUNT(*), MAX(note_title) FROM link_note') == [(1, 'Sam Q')], f'{label}: link_note binds a link to one note')
+    db.execute('DELETE FROM link_note')
 
 
 def check_crash_safe(make, label, up_len):
@@ -416,7 +420,8 @@ def main():
         check(after.get(k) == v, f'v2 upgrade changed {k}')
     added = sorted(set(after) - set(before))
     check(added == sorted(['schema:vault_note', 'rows:vault_note', 'schema:vault_note_link', 'schema:sqlite_autoindex_vault_note_1',
-                           'schema:link_source', 'rows:link_source']),
+                           'schema:link_source', 'rows:link_source', 'schema:link_note', 'rows:link_note',
+                           'schema:link_note_doc']),
           f'v2 upgrade added exactly the new tables and index: {added}')
     check(n_tables_before > 10, 'the v2 fixture filled the tables')
     for t in ('link', 'entry', 'entry_link', 'moment', 'moment_tag', 'moment_ref', 'feeling_tag', 'mood', 'export_state', 'export_day', 'group_calendar'):

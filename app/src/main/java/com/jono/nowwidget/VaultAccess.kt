@@ -6,7 +6,14 @@ import android.provider.DocumentsContract
 import java.io.IOException
 
 /** One file or folder directly inside a folder of the vault, as the provider lists it. */
-class VaultFile(val docId: String, val name: String, val modified: Long, val isDir: Boolean)
+class VaultFile(
+    val docId: String,
+    val name: String,
+    val modified: Long,
+    val isDir: Boolean,
+    /** Above 0: no .obsidian folder was seen, and this folder was only guessed to be the vault from its note count. */
+    val guessedNotes: Int = 0,
+)
 
 /**
  * Everything that talks to the vault folder, through DocumentsContract directly (no androidx).
@@ -133,9 +140,8 @@ object VaultAccess {
             }
         }
         if (inside.isNotEmpty()) return inside
-        if (top.count { !it.isDir && it.name.endsWith(".md", ignoreCase = true) } >= 20) {
-            return listOf(VaultFile(rootId, treeName(ctx, tree), 0L, true))
-        }
+        val notes = top.count { !it.isDir && it.name.endsWith(".md", ignoreCase = true) }
+        if (notes >= 20) return listOf(VaultFile(rootId, treeName(ctx, tree), 0L, true, guessedNotes = notes))
         return emptyList()
     }
 }

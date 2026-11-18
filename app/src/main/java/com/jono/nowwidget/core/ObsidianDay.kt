@@ -46,6 +46,8 @@ data class DayData(
     val spans: List<DaySpan>,
     val moments: List<DayMoment>,
     val tz: TimeZone = TimeZone.getDefault(),
+    /** Link title to the title of the vault note it is bound to by alias, where that differs. */
+    val notes: Map<String, String> = emptyMap(),
 )
 
 /**
@@ -84,14 +86,21 @@ object ObsidianDay {
 
     /**
      * `[[Title]]`, unless the title has something that would break a link (a pipe, a hash,
-     * brackets) or a line break: then plain text, so no link is ever half right.
+     * brackets) or a line break: then plain text, so no link is ever half right. A link that is
+     * bound to a note under another title (an alias) is `[[Note Title|Link title]]`; if either part
+     * would break the link, the link title is written as plain text.
      */
-    fun link(name: String): String {
-        val n = name.replace("\r", " ").replace("\n", " ").trim()
-        val bad = n.isEmpty() || n.contains('|') || n.contains('#') || n.contains("[[") || n.contains("]]") ||
-            n.startsWith("[") || n.endsWith("]")
-        return if (bad) n else "[[$n]]"
+    fun link(name: String, note: String? = null): String {
+        val n = clean(name)
+        val target = if (note == null) n else clean(note)
+        if (broken(n) || broken(target)) return n
+        return if (target.equals(n, ignoreCase = false)) "[[$n]]" else "[[$target|$n]]"
     }
+
+    private fun clean(s: String): String = s.replace("\r", " ").replace("\n", " ").trim()
+
+    private fun broken(n: String): Boolean = n.isEmpty() || n.contains('|') || n.contains('#') || n.contains("[[") ||
+        n.contains("]]") || n.startsWith("[") || n.endsWith("]")
 
     /** "a", "a and b", "a, b and c". */
     fun names(items: List<String>): String = when (items.size) {
@@ -133,9 +142,9 @@ object ObsidianDay {
         val people = top(d.spans.flatMap { s -> s.people.map { it to (s.to - s.from) } })
         val context = top(d.spans.mapNotNull { s -> s.context?.let { it to (s.to - s.from) } }).firstOrNull()
         val parts = ArrayList<String>()
-        if (place != null) parts.add("At " + link(place))
-        if (people.isNotEmpty()) parts.add("w " + names(people.map { link(it) }))
-        if (context != null) parts.add("in " + link(context))
+        if (place != null) parts.add("At " + link(place, d.notes[place]))
+        if (people.isNotEmpty()) parts.add("w " + names(people.map { link(it, d.notes[it]) }))
+        if (context != null) parts.add("in " + link(context, d.notes[context]))
         return parts.joinToString(" ") to context
     }
 
@@ -200,9 +209,9 @@ object ObsidianDay {
             sb.append(' ')
             if (s.emoji.isNotBlank()) sb.append(s.emoji.trim()).append(' ')
             sb.append(s.activity)
-            if (s.people.isNotEmpty()) sb.append(" w ").append(names(s.people.map { link(it) }))
-            if (s.places.isNotEmpty()) sb.append(" at ").append(names(s.places.map { link(it) }))
-            if (s.context != null && s.context != headContext) sb.append(" in ").append(link(s.context))
+            if (s.people.isNotEmpty()) sb.append(" w ").append(names(s.people.map { link(it, d.notes[it]) }))
+            if (s.places.isNotEmpty()) sb.append(" at ").append(names(s.places.map { link(it, d.notes[it]) }))
+            if (s.context != null && s.context != headContext) sb.append(" in ").append(link(s.context, d.notes[s.context]))
             if (s.running) sb.append(" (running)")
             lines.add(sb.toString())
             attached[i].forEach { mo ->

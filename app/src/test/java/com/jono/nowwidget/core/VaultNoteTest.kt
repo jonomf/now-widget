@@ -35,19 +35,49 @@ class VaultNoteTest {
     }
 
     @Test
-    fun datedAndOwnNotesAreSkipped() {
+    fun plainDailyNotesAndOwnNotesAreSkipped() {
         assertNull(parse("2025-4-9.md", "#log"))
-        assertNull(parse("2025-4-9 (long).md", ""))
-        assertNull(parse("2025-12-31 -- Party.md", "#event"))
+        assertNull(parse("2025-12-31.md", "#event"))
         assertNull(parse("2025-4-9 (now).md", "#log-now"))
+        assertNull(parse("2025-4-9 (now) (1).md", "#log-now"))
         assertNull(parse("Weird (now).md", ""))
         assertNull(parse("image.png", ""))
         assertNull(parse(".md", ""))
         assertEquals("2025-4 Trip Home", parse("2025-4 Trip Home.md", "")!!.title)
         assertEquals("2025", parse("2025.md", "")!!.title)
         assertEquals(false, VaultNotes.candidate("2025-4-9.md"))
+        assertEquals(false, VaultNotes.candidate("2025-4-9 (now).md"))
+        assertEquals(false, VaultNotes.candidate("2025-4-9 (now) (1).md"))
+        assertEquals(true, VaultNotes.candidate("2025-4-9 (long).md"))
         assertEquals(true, VaultNotes.candidate("Sam.md"))
         assertEquals(false, VaultNotes.candidate("Sam.png"))
+    }
+
+    @Test
+    fun dailyCompanionsAreSkipped() {
+        assertNull(parse("2025-4-9 (long).md", ""))
+        assertNull(parse("2025-4-9 (VRChat).md", "#log"))
+        assertNull(parse("2025-4-9 14-30.md", "#log"))
+        assertNull(parse("2025-4-9 9-05.md", ""))
+        assertEquals(true, VaultNotes.isCompanion("2025-4-9 (long)"))
+        assertEquals(true, VaultNotes.isCompanion("2025-4-9 14-30"))
+        assertEquals(false, VaultNotes.isCompanion("2025-4-9 -- Party"))
+    }
+
+    @Test
+    fun datedEventNotesAreKeptAsContexts() {
+        // The "-- Title" notes are kept, tagged or not.
+        val party = parse("2025-12-31 -- Party.md", "#event")!!
+        assertEquals("2025-12-31 -- Party", party.title)
+        assertEquals(LinkKind.CONTEXT, party.kind)
+        assertEquals(LinkKind.CONTEXT, parse("2025-6-1 -- Fair.md", "#event-com in [[Town]]")!!.kind)
+        assertEquals(LinkKind.OTHER, parse("2025-6-1 -- Thoughts.md", "#log")!!.kind)
+        // Any other dated note whose first-line tag is an event is a context.
+        assertEquals(LinkKind.CONTEXT, parse("2025-6-1 Concert.md", "#event")!!.kind)
+        assertEquals(LinkKind.CONTEXT, parse("2025-6-1 (long).md", "#event")!!.kind)
+        assertEquals(LinkKind.CONTEXT, parse("2025-6-1 20-00.md", "---\ntags: x\n---\n#event-com")!!.kind)
+        // ...but a plain daily note never is.
+        assertNull(parse("2025-6-1.md", "#event"))
     }
 
     @Test
