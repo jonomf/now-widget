@@ -6,60 +6,55 @@ import android.app.job.JobScheduler
 import android.app.job.JobService
 import android.content.ComponentName
 import android.content.Context
+import com.jono.nowwidget.core.CalIdentity
+import com.jono.nowwidget.core.CalLedger
 import com.jono.nowwidget.core.CalRecord
+import com.jono.nowwidget.core.CalRef
+import com.jono.nowwidget.core.CalRow
 import com.jono.nowwidget.core.CalendarDay
 import com.jono.nowwidget.core.CalendarOwnership
 import com.jono.nowwidget.core.CalendarPlan
+import com.jono.nowwidget.core.CalendarSetup
+import com.jono.nowwidget.core.CalendarSync
 import com.jono.nowwidget.core.DesiredEvent
 import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.EventColors
 import com.jono.nowwidget.core.ExportProtocol
-import com.jono.nowwidget.core.ObsidianDay
-import com.jono.nowwidget.core.SeenEvent
+import com.jono.nowwidget.core.PlannedEvent
+import com.jono.nowwidget.core.ResolvedSetup
 import java.util.TimeZone
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * The calendar settings as one run sees them, read once. [logCalendars] are the only calendars the
- * app ever writes to; null [problem] means they all exist and can be written.
+ * The calendar settings as one run sees them, resolved against the calendars on the phone by
+ * identity (see [CalendarSetup]). Reads the calendar store: background threads only.
  */
 class CalSetup(ctx: Context) {
-    val calendars: Map<Long, CalInfo> = CalendarAccess.calendars(ctx).associateBy { it.id }
-    val areas: Map<String, Long?> = Store.groupAreas(ctx)
-    val perArea = Prefs.calPerArea(ctx)
-    val defaultLog = Prefs.calLog(ctx)
-    val areaLogs: Map<Long, Long> = if (perArea) Prefs.calAreaLogs(ctx) else emptyMap()
+    val list: List<CalRow> = CalendarAccess.calendars(ctx)
+    val areaRefs: Map<String, CalRef?> = Store.groupAreas(ctx)
+    val r: ResolvedSetup = CalendarSetup.resolve(list, Prefs.calLog(ctx), Prefs.calPerArea(ctx), areaRefs, Prefs.calAreaLogs(ctx))
+    private val refused = HashSet(Prefs.calRefusedColors(ctx))
 
-    /** Every log calendar the settings name. */
-    val chosen: Set<Long> = (listOf(defaultLog) + areaLogs.values).filter { it > 0L }.toSet()
-    val logCalendars: Set<Long> = chosen.filter { calendars[it]?.writable == true }.toSet()
+    val calendars: Map<Long, CalRow> get() = r.rows
+    val problem: String? get() = r.problem
+    val logCalendars: Set<Long> get() = r.logCalendars
+    val chosen: Set<Long> get() = r.chosen
+    val defaultLog: Long get() = r.defaultLog
+    val areaCalendars: Set<Long> get() = r.areaCalendars
 
-    val problem: String? = when {
-        defaultLog <= 0L -> "No log calendar chosen."
-        chosen.any { it !in calendars } -> "A log calendar isn't on the phone any more (or isn't synced). Check the Calendar settings."
-        chosen.any { it !in logCalendars } -> "The app can't add events to " + chosen.filter { it !in logCalendars }
-            .joinToString(", ") { calendars[it]?.label ?: "?" } + "."
-        else -> null
-    }
+    fun areaOf(group: String): Long? = r.areaOf(group)
+    fun target(group: String): Long? = r.target(group)
 
-    /** The calendars planned events are read from: the areas, never a log calendar. */
-    val areaCalendars: Set<Long> = areas.values.filterNotNull().filter { it !in chosen && it in calendars }.toSet()
-
-    fun areaOf(group: String): Long? = areas[group.trim()]
-
-    /** Where a group's events go. */
-    fun target(group: String): Long? {
-        val area = areaOf(group)
-        val t = if (perArea && area != null) areaLogs[area] ?: defaultLog else defaultLog
-        return t.takeIf { it in logCalendars }
-    }
+    fun accountKey(calendarId: Long): String? = calendars[calendarId]?.let { it.accountType + CalIdentity.SEP + it.account }
 
     private val colorCache = HashMap<String, List<Pair<String, Int>>>()
 
+    /** The account's event colors, minus any key it refused before. */
     fun colorsFor(ctx: Context, calendarId: Long): List<Pair<String, Int>> {
         val cal = calendars[calendarId] ?: return emptyList()
-        return colorCache.getOrPut(cal.accountType + "\u0000" + cal.account) {
+        val acct = accountKey(calendarId) ?: return emptyList()
+        val all = colorCache.getOrPut(acct) {
             try {
                 CalendarAccess.eventColors(ctx, cal.account, cal.accountType)
             } catch (e: SecurityException) {
@@ -68,6 +63,7 @@ class CalSetup(ctx: Context) {
                 emptyList()
             }
         }
+        return all.filter { (acct + CalRef.SEP_PAIR + it.first) !in refused }
     }
 
     /** The event color nearest the group's area calendar color, from the target calendar's account; null for none. */
@@ -76,18 +72,38 @@ class CalSetup(ctx: Context) {
         val color = calendars[area]?.color ?: return null
         return EventColors.nearest(color, colorsFor(ctx, target))
     }
+
+    /** Remembers a refused key so it isn't tried again (this run or later ones). */
+    fun refuse(ctx: Context, d: DesiredEvent) {
+        val acct = accountKey(d.calendarId) ?: return
+        val k = d.colorKey ?: return
+        refused.add(acct + CalRef.SEP_PAIR + k)
+        Prefs.addCalRefusedColor(ctx, acct, k)
+    }
+}
+
+/** The Store's calendar records as [CalendarSync] sees them. */
+class StoreCalLedger(private val ctx: Context) : CalLedger {
+    override fun gen(day: String) = Store.dayGen(ctx, day, Store.CALENDAR)
+    override fun clearIfUnchanged(day: String, gen: Int) = Store.clearDirtyIf(ctx, day, gen, Store.CALENDAR)
+    override fun records(day: String) = Store.calRecords(ctx, day)
+    override fun released(day: String) = Store.releasedKeys(ctx, day)
+    override fun save(r: CalRecord) = Store.saveCalRecord(ctx, r)
+    override fun drop(key: String) = Store.dropCalRecord(ctx, key)
+    override fun leave(r: CalRecord) = Store.leaveCalRecord(ctx, r)
+    override fun release(r: CalRecord, why: CalendarOwnership.Verdict) = Store.releaseCalRecord(ctx, r, why.name)
 }
 
 /**
  * Writes the log into the calendar: one event per finished run of five minutes or more, on the
  * phone's calendar store, which Google's sync uploads. Same protocol as the Obsidian export (dirty
- * days with change counters, a debounced job, nothing cleared until written). Never updates or
- * deletes an event that [CalendarOwnership] doesn't say is the app's own. All on background threads.
+ * days with change counters, a debounced job, nothing cleared until written). The decisions are in
+ * [CalendarSync] and [CalendarPlan]; nothing here updates or deletes an event that
+ * [CalendarOwnership] doesn't say is the app's own. All on background threads.
  */
 object CalendarExport {
     private const val SCHEDULE_GAP_MS = 5_000L
     private const val MAX_PASSES = 20
-    private const val HOUR = 3_600_000L
 
     private val lock = Any()
     private val writing = AtomicBoolean(false)
@@ -100,7 +116,7 @@ object CalendarExport {
     @Volatile var busy: String = ""
         private set
 
-    fun configured(ctx: Context): Boolean = Prefs.calOn(ctx) && Prefs.calLog(ctx) > 0L && CalendarAccess.granted(ctx)
+    fun configured(ctx: Context): Boolean = Prefs.calOn(ctx) && Prefs.calLog(ctx) != null && CalendarAccess.granted(ctx)
 
     private fun notifyListeners() = listeners.forEach { it() }
 
@@ -150,7 +166,7 @@ object CalendarExport {
         }
     }
 
-    /** Turning the export on: every day with something logged is written (imported-only days are skipped). */
+    /** Turning the export on: every day with something logged is written (imported-only days have no events). */
     fun start(ctx: Context) = task(ctx, "Writing all days…") { app ->
         Store.markDaysDirty(app, Store.CALENDAR, Store.activeDays(app, includeImported = false))
         writeDirty(app)
@@ -189,6 +205,7 @@ object CalendarExport {
         if (!configured(ctx)) return
         writing.set(true)
         val attempted = HashMap<String, Int>()
+        var recheck = false
         try {
             var pass = 0
             while (pass++ < MAX_PASSES) {
@@ -197,29 +214,38 @@ object CalendarExport {
                 if (keys.isEmpty()) break
                 keys.forEach { attempted[it] = dirty.getValue(it) }
                 lastAttempted = HashMap(attempted)
-                if (!write(ctx, keys)) break
+                val r = write(ctx, keys) ?: break
+                if (r) recheck = true
             }
         } finally {
             lastAttempted = HashMap(attempted)
             writing.set(false)
         }
         if (!CalendarJob.active && pendingNow(ctx)) CalendarJob.schedule(ctx.applicationContext)
+        // An event read as gone is looked at again after the wait, before anything replaces it.
+        if (recheck) CalendarJob.scheduleRecheck(ctx.applicationContext, CalendarPlan.GONE_WAIT_MS + 60_000L)
     }
 
-    /** Writes these days. False when the whole run had to stop (no access, a log calendar missing). */
-    private fun write(ctx: Context, keys: List<String>): Boolean {
+    /**
+     * Writes these days. Null when the whole run had to stop (a log calendar missing, unsynced or
+     * swapped: nothing is written then); otherwise whether some day is waiting on a gone event.
+     */
+    private fun write(ctx: Context, keys: List<String>): Boolean? {
         val setup = CalSetup(ctx)
         val problem = setup.problem
         if (problem != null) {
             Prefs.setCalError(ctx, problem)
             notifyListeners()
-            return false
+            return null
         }
         val now = System.currentTimeMillis()
         val lk = ObsidianExport.Lookups(ctx)
         val tz = TimeZone.getDefault().id
+        val provider = RealCalProvider(ctx)
+        val ledger = StoreCalLedger(ctx)
         val errors = ArrayList<String>()
         var changed = 0
+        var waiting = false
         for (key in keys.distinct()) {
             val ymd = ObsidianExport.parseKey(key)
             val dayStart = ymd?.let { DiaryDay.startOf(it.first, it.second, it.third) }
@@ -228,8 +254,18 @@ object CalendarExport {
                 continue
             }
             try {
-                val n = writeDay(ctx, setup, lk, key, dayStart, now, tz, errors)
-                changed += n
+                val data = ObsidianExport.dayData(ctx, lk, dayStart, now)
+                // Days with only Daylio check-ins have no spans, so they never get events.
+                val desired = CalendarDay.events(data).mapNotNull { e ->
+                    val target = setup.target(e.group) ?: return@mapNotNull null
+                    DesiredEvent(e.key, target, e.title, e.description, e.from, e.to, setup.colorKey(ctx, e.group, target), tz)
+                }
+                val r = CalendarSync.writeDay(provider, ledger, key, dayStart, DiaryDay.add(dayStart, 1), desired, setup.logCalendars, now, errors) { d ->
+                    setup.refuse(ctx, d)
+                    errors.add("$key: the calendar refused color ${d.colorKey}, so that event has no color")
+                }
+                changed += r.changed
+                if (r.actions.any { it is CalendarPlan.Action.Suspect || (it is CalendarPlan.Action.Keep && it.record.suspectSince != null) }) waiting = true
             } catch (e: SecurityException) {
                 errors.add(describe(e))
                 break
@@ -240,123 +276,25 @@ object CalendarExport {
         if (changed > 0) Prefs.setCalLastExport(ctx, now)
         Prefs.setCalError(ctx, errors.take(3).joinToString("\n") + if (errors.size > 3) "\n…and ${errors.size - 3} more" else "")
         notifyListeners()
-        return true
+        return waiting
     }
 
-    /** One day: read the change counter, work out the events, apply the plan, clear only if all of it worked. */
-    private fun writeDay(
-        ctx: Context,
-        setup: CalSetup,
-        lk: ObsidianExport.Lookups,
-        key: String,
-        dayStart: Long,
-        now: Long,
-        tz: String,
-        errors: MutableList<String>,
-    ): Int {
-        val gen = Store.dayGen(ctx, key, Store.CALENDAR)
-        val data = ObsidianExport.dayData(ctx, lk, dayStart, now)
-        // Days with only Daylio check-ins have no spans, so they never get events.
-        val desired = CalendarDay.events(data).mapNotNull { e ->
-            val target = setup.target(e.group) ?: return@mapNotNull null
-            DesiredEvent(e.key, target, e.title, e.description, e.from, e.to, setup.colorKey(ctx, e.group, target), tz)
-        }
-        val records = Store.calRecords(ctx, key)
-        if (desired.isEmpty() && records.isEmpty()) {
-            Store.clearDirtyIf(ctx, key, gen, Store.CALENDAR)
-            return 0
-        }
-        val seen = CalendarAccess.read(ctx, records.map { it.eventId })
-        val byKey = records.associateBy { it.key }
-        // Only look for unrecorded events of ours when some event has no record that holds up.
-        val unplaced = desired.filter { d ->
-            val r = byKey[d.key]
-            r == null || r.calendarId != d.calendarId ||
-                CalendarOwnership.check(r, seen[r.eventId], setup.logCalendars) != CalendarOwnership.Verdict.OURS
-        }
-        val found = HashMap<String, SeenEvent>()
-        val dayEnd = DiaryDay.add(dayStart, 1)
-        unplaced.map { it.calendarId }.distinct().forEach { cal ->
-            CalendarAccess.findMarked(ctx, cal, dayStart - HOUR, dayEnd + HOUR).forEach { s ->
-                val k = CalendarDay.markerOf(s.description)
-                if (k != null && k !in found) found[k] = s
-            }
-        }
-        val actions = CalendarPlan.plan(desired, records, seen, found, setup.logCalendars)
-        var ok = true
-        var n = 0
-        actions.forEach { a ->
-            try {
-                when (a) {
-                    is CalendarPlan.Action.Insert -> {
-                        // A crash between these two leaves an event with no record; its marker lets the next run adopt it.
-                        val (id, written) = withColorFallback(a.event, errors, key) { CalendarAccess.insert(ctx, it) }
-                        Store.saveCalRecord(ctx, CalRecord(a.event.key, a.event.calendarId, id, written.hash))
-                        n++
-                    }
-                    is CalendarPlan.Action.Update -> {
-                        val (_, written) = withColorFallback(a.event, errors, key) { CalendarAccess.update(ctx, a.eventId, it) }
-                        Store.saveCalRecord(ctx, CalRecord(a.event.key, a.event.calendarId, a.eventId, written.hash))
-                        n++
-                    }
-                    is CalendarPlan.Action.Adopt -> {
-                        // Record first (with no hash): if the update is cut short, the next run updates it again.
-                        Store.saveCalRecord(ctx, CalRecord(a.event.key, a.event.calendarId, a.eventId, ""))
-                        val (_, written) = withColorFallback(a.event, errors, key) { CalendarAccess.update(ctx, a.eventId, it) }
-                        Store.saveCalRecord(ctx, CalRecord(a.event.key, a.event.calendarId, a.eventId, written.hash))
-                        n++
-                    }
-                    is CalendarPlan.Action.Delete -> {
-                        CalendarAccess.delete(ctx, a.record.eventId)
-                        Store.dropCalRecord(ctx, a.record.key)
-                        n++
-                    }
-                    is CalendarPlan.Action.Forget -> Store.dropCalRecord(ctx, a.record.key)
-                    is CalendarPlan.Action.Leave -> Store.leaveCalRecord(ctx, a.record)
-                    is CalendarPlan.Action.Keep -> Unit
-                }
-            } catch (e: SecurityException) {
-                throw e
-            } catch (e: Exception) {
-                ok = false
-                errors.add(key + ": " + describe(e))
-            }
-        }
-        if (ok) Store.clearDirtyIf(ctx, key, gen, Store.CALENDAR)
-        return n
-    }
-
-    /**
-     * Android refuses a color key the account doesn't have (IllegalArgumentException). Then the
-     * event is written without a color, and that's what gets recorded, so it's tried again next time.
-     */
-    private fun <T> withColorFallback(d: DesiredEvent, errors: MutableList<String>, key: String, write: (DesiredEvent) -> T): Pair<T, DesiredEvent> {
-        if (d.colorKey == null) return write(d) to d
-        return try {
-            write(d) to d
-        } catch (e: IllegalArgumentException) {
-            val plain = d.copy(colorKey = null)
-            val r = write(plain)
-            errors.add("$key: color ${d.colorKey} was refused, so an event has no color (" + describe(e) + ")")
-            r to plain
-        }
-    }
-
-    // --- Test event ---
+    // --- Test events ---
 
     private const val TEST_MS = 5L * 60_000L
 
     /**
      * Writes one 5-minute test event ending now into the log calendar, with a color key, reads it
-     * back and says in plain words what happened. Its record lets "Delete test event" remove it.
+     * back and says in plain words what happened. Every test event is recorded, so "Delete test
+     * events" can remove them all.
      */
     fun test(ctx: Context) = task(ctx, "Testing the calendar…") { app ->
         val out = ArrayList<String>()
         val setup = CalSetup(app)
         val cal = setup.defaultLog
         val info = setup.calendars[cal]
-        if (cal <= 0L || info == null) {
-            Prefs.setCalTest(app, Fmt.day(System.currentTimeMillis()) + ": no log calendar chosen.")
+        if (info == null) {
+            Prefs.setCalTest(app, setup.problem ?: "No log calendar chosen.")
             return@task
         }
         if (!info.writable) {
@@ -364,7 +302,7 @@ object CalendarExport {
             return@task
         }
         val colors = setup.colorsFor(app, cal)
-        val areaColor = setup.areas.values.filterNotNull().firstNotNullOfOrNull { setup.calendars[it]?.color }
+        val areaColor = setup.areaCalendars.firstNotNullOfOrNull { setup.calendars[it]?.color }
         // An area's color if there is one; otherwise the color least like the calendar's own, so it shows.
         val colorKey = when {
             colors.isEmpty() -> null
@@ -375,18 +313,21 @@ object CalendarExport {
         val key = "test/$end"
         val d = DesiredEvent(
             key, cal, "Now: test event",
-            "A test from the Now app. Delete it from the app (Calendar → Delete test event) or here.\n\n" + CalendarDay.marker(key),
+            "A test from the Now app. Delete it from the app (Calendar → Delete test events) or here.\n\n" + CalendarDay.marker(key),
             end - TEST_MS, end, colorKey, TimeZone.getDefault().id,
         )
-        val id = CalendarAccess.insert(app, d)
-        Store.saveTestRecord(app, CalRecord(key, cal, id, ""))
+        val (id, written) = CalendarSync.withColorFallback(d, { setup.refuse(app, it) }) { CalendarAccess.insert(app, it) }
+        Store.addTestRecord(app, CalRecord(key, cal, id, ""))
         val back = CalendarAccess.readBack(app, id)
         out.add("Inserted event $id into ${info.label} (${info.account}).")
         if (info.local) out.add("That calendar is only on this phone, so it will never reach Google.")
-        if (!info.synced) out.add("That calendar isn't set to sync on this phone, so it may not reach Google.")
+        if (!info.synced) out.add("That calendar isn't set to sync on this phone, so it won't reach Google.")
         out.add(
-            if (colors.isEmpty()) "The account has no event colors, so the event has no color of its own."
-            else "The account has ${colors.size} event colors. Used color key $colorKey."
+            when {
+                colors.isEmpty() -> "The account has no event colors, so the event has no color of its own."
+                written.colorKey == null -> "The account lists ${colors.size} event colors, but refused key $colorKey, so the event has no color."
+                else -> "The account has ${colors.size} event colors. Used color key $colorKey."
+            }
         )
         when {
             back == null -> out.add("Reading it back found nothing.")
@@ -400,27 +341,21 @@ object CalendarExport {
         Prefs.setCalTest(app, Fmt.day(end) + ", " + Fmt.time(app, end) + "\n" + out.joinToString("\n"))
     }
 
-    fun deleteTest(ctx: Context) = task(ctx, "Deleting the test event…") { app ->
-        val r = Store.testRecord(app)
-        if (r == null) {
-            Prefs.setCalTest(app, "No test event to delete.")
+    fun deleteTests(ctx: Context) = task(ctx, "Deleting test events…") { app ->
+        val tests = Store.testRecords(app)
+        if (tests.isEmpty()) {
+            Prefs.setCalTest(app, "No test events to delete.")
             return@task
         }
         val setup = CalSetup(app)
-        val seen = CalendarAccess.read(app, listOf(r.eventId))[r.eventId]
-        val msg = when (val v = CalendarOwnership.check(r, seen, setup.logCalendars)) {
-            CalendarOwnership.Verdict.OURS -> {
-                CalendarAccess.delete(app, r.eventId)
-                Store.saveTestRecord(app, null)
-                "Test event deleted."
-            }
-            CalendarOwnership.Verdict.GONE -> {
-                Store.saveTestRecord(app, null)
-                "The test event was already gone."
-            }
-            else -> "Left the test event alone: " + why(v) + " Delete it in Google Calendar if you like."
+        val r = CalendarSync.deleteTests(RealCalProvider(app), tests, setup.chosen) { Store.dropTestRecord(app, it.key) }
+        val parts = ArrayList<String>()
+        parts.add("Deleted ${r.deleted} test event" + (if (r.deleted == 1) "" else "s") + ".")
+        if (r.gone > 0) parts.add("${r.gone} already gone.")
+        if (r.leftAlone.isNotEmpty()) {
+            parts.add("Left ${r.leftAlone.size} alone: " + r.leftAlone.distinct().joinToString(" ") { why(it) } + " Delete them in Google Calendar if you like.")
         }
-        Prefs.setCalTest(app, msg)
+        Prefs.setCalTest(app, parts.joinToString(" "))
     }
 
     fun why(v: CalendarOwnership.Verdict): String = when (v) {
@@ -436,63 +371,61 @@ object CalendarExport {
 
     // --- Old log calendars ---
 
-    /** Calendars the app wrote log events to that aren't log calendars now, with how many it recorded there. */
-    fun oldCalendars(ctx: Context, logCalendars: Set<Long>): Map<Long, Int> =
-        (Store.allCalRecords(ctx) + Store.leftCalRecords(ctx)).filter { it.calendarId !in logCalendars }
-            .groupingBy { it.calendarId }.eachCount()
-
     /**
-     * Deletes the app's own events from a calendar that is no longer a log calendar. Each one must
-     * pass [CalendarOwnership.check] with that calendar allowed (the app wrote there when it was a
-     * log calendar, and the record says so); anything else is left alone and only its record goes.
+     * Calendars the app wrote log events to that aren't log calendars now, with how many it recorded
+     * there. Empty while the settings have a problem (then it can't tell which calendars are current).
      */
+    fun oldCalendars(ctx: Context, setup: ResolvedSetup?): Map<Long, Int> {
+        if (setup == null || setup.problem != null) return emptyMap()
+        return (Store.allCalRecords(ctx) + Store.leftCalRecords(ctx)).filter { it.calendarId !in setup.chosen }
+            .groupingBy { it.calendarId }.eachCount()
+    }
+
+    /** Deletes the app's own events from a calendar that's no longer a log calendar (see [CalendarSync.removeFrom]). */
     fun removeFrom(ctx: Context, calendarId: Long, label: String) = task(ctx, "Removing log events…") { app ->
         val setup = CalSetup(app)
-        if (calendarId in setup.chosen) {
-            Prefs.setCalInfo(app, "$label is a log calendar now, so nothing was removed.")
+        if (setup.problem != null || calendarId in setup.chosen) {
+            Prefs.setCalInfo(app, setup.problem ?: "$label is a log calendar now, so nothing was removed.")
             return@task
         }
-        val current = Store.allCalRecords(app).filter { it.calendarId == calendarId }
-        val left = Store.leftCalRecords(app).filter { it.calendarId == calendarId }
-        val seen = CalendarAccess.read(app, (current + left).map { it.eventId })
-        var removed = 0
-        var alone = 0
-        fun one(r: CalRecord, drop: () -> Unit) {
-            when (CalendarOwnership.check(r, seen[r.eventId], setOf(calendarId))) {
-                CalendarOwnership.Verdict.OURS -> {
-                    CalendarAccess.delete(app, r.eventId)
-                    removed++
-                }
-                CalendarOwnership.Verdict.GONE -> Unit
-                else -> alone++
-            }
-            drop()
+        val p = RealCalProvider(app)
+        val dropped = ArrayList<CalRecord>()
+        val a = CalendarSync.removeFrom(p, Store.allCalRecords(app), calendarId) {
+            Store.dropCalRecord(app, it.key)
+            dropped.add(it)
         }
-        current.forEach { r -> one(r) { Store.dropCalRecord(app, r.key) } }
-        left.forEach { r -> one(r) { Store.dropLeftRecord(app, r) } }
+        val b = CalendarSync.removeFrom(p, Store.leftCalRecords(app), calendarId) { Store.dropLeftRecord(app, it) }
         // Days whose records went are written again into the log calendar.
-        Store.markDaysDirty(app, Store.CALENDAR, current.mapNotNull { r ->
+        Store.markDaysDirty(app, Store.CALENDAR, dropped.mapNotNull { r ->
             ObsidianExport.parseKey(CalendarDay.dayOf(r.key))?.let { DiaryDay.startOf(it.first, it.second, it.third) }
         }.distinct())
+        val removed = a.removed + b.removed
+        val alone = a.leftAlone + b.leftAlone
+        val failed = a.failed + b.failed
         Prefs.setCalInfo(
             app,
             "Removed $removed event" + (if (removed == 1) "" else "s") + " from $label." +
-                if (alone > 0) " Left $alone alone (changed by hand or not the app's)." else "",
+                (if (alone > 0) " Left $alone alone (changed by hand or not the app's)." else "") +
+                (if (failed > 0) " $failed couldn't be deleted; try again." else ""),
         )
-        if (current.isNotEmpty()) writeDirty(app)
+        if (dropped.isNotEmpty()) writeDirty(app)
     }
 }
 
 /**
  * Planned events for the widget's nudge, read off the main thread and kept for a few minutes. The
  * widget asks when it redraws; a stale cache is refreshed in the background, which redraws again
- * only if the answer changed. No alarms of its own.
+ * only if the answer changed. After each refresh a one-off job is set for the next start or end of
+ * a planned event, so the first button changes on time (no alarms).
  */
 object PlannedCache {
     private const val FRESH_MS = 10L * 60_000L
     private const val AHEAD_MS = 12L * 3_600_000L
 
-    @Volatile private var events: List<com.jono.nowwidget.core.PlannedEvent> = emptyList()
+    @Volatile private var events: List<PlannedEvent> = emptyList()
+    /** Group to its area calendar id, resolved with the events (the widget can't read the calendar store itself). */
+    @Volatile var areas: Map<String, Long?> = emptyMap()
+        private set
     @Volatile private var fetchedAt = 0L
     private val fetching = AtomicBoolean(false)
 
@@ -502,9 +435,20 @@ object PlannedCache {
     }
 
     /** What's cached now (maybe empty); starts a refresh when it's old. Cheap: safe on the main thread. */
-    fun current(ctx: Context, now: Long): List<com.jono.nowwidget.core.PlannedEvent> {
+    fun current(ctx: Context, now: Long): List<PlannedEvent> {
         if (now - fetchedAt > FRESH_MS || now < fetchedAt) refresh(ctx, now)
         return events
+    }
+
+    /** Sets the redraw job for the next start or end of a cached planned event. */
+    fun scheduleNext(ctx: Context) {
+        try {
+            val now = System.currentTimeMillis()
+            val next = CalendarSync.nextBoundary(events, now) ?: return
+            NudgeJob.schedule(ctx.applicationContext, next - now)
+        } catch (e: Exception) {
+            // The widget's own refresh still catches up.
+        }
     }
 
     private fun refresh(ctx: Context, now: Long) {
@@ -516,6 +460,7 @@ object PlannedCache {
                     if (!Prefs.calNudge(app) || !CalendarAccess.granted(app)) emptyList()
                     else {
                         val setup = CalSetup(app)
+                        areas = setup.areaRefs.keys.associateWith { setup.areaOf(it) }
                         CalendarAccess.planned(app, setup.areaCalendars, now - AHEAD_MS, now + AHEAD_MS)
                     }
                 } catch (e: Exception) {
@@ -524,6 +469,7 @@ object PlannedCache {
                 val before = events
                 events = next
                 fetchedAt = System.currentTimeMillis()
+                scheduleNext(app)
                 if (next != before) WidgetRenderer.refresh(app)
             } catch (e: Throwable) {
                 fetchedAt = System.currentTimeMillis()
@@ -534,7 +480,41 @@ object PlannedCache {
     }
 }
 
-/** The calendar export's debounce, like [ExportJob]. */
+/** Redraws the widget when a planned event starts or ends, so its activity moves to the first button on time. */
+class NudgeJob : JobService() {
+    override fun onStartJob(params: JobParameters): Boolean {
+        val app = applicationContext
+        Thread {
+            try {
+                WidgetRenderer.refresh(app)
+                PlannedCache.scheduleNext(app)
+            } catch (e: Throwable) {
+                // Nothing to record: the next redraw catches up.
+            }
+            jobFinished(params, false)
+        }.start()
+        return true
+    }
+
+    override fun onStopJob(params: JobParameters): Boolean = false
+
+    companion object {
+        private const val JOB_ID = 4203
+        private const val SLACK_MS = 60_000L
+
+        fun schedule(ctx: Context, inMs: Long) {
+            val scheduler = ctx.getSystemService(JobScheduler::class.java) ?: return
+            val delay = maxOf(0L, inMs) + 5_000L
+            val info = JobInfo.Builder(JOB_ID, ComponentName(ctx, NudgeJob::class.java))
+                .setMinimumLatency(delay)
+                .setOverrideDeadline(delay + SLACK_MS)
+                .build()
+            scheduler.schedule(info)
+        }
+    }
+}
+
+/** The calendar export's debounce, like [ExportJob]; a second id is the later re-check of a gone event. */
 class CalendarJob : JobService() {
     override fun onStartJob(params: JobParameters): Boolean {
         val app = applicationContext
@@ -556,18 +536,24 @@ class CalendarJob : JobService() {
 
     companion object {
         private const val JOB_ID = 4202
+        private const val RECHECK_ID = 4204
         private const val DELAY_MS = 60_000L
         private const val LATEST_MS = 5L * 60_000L
 
         @Volatile var active = false
 
-        fun schedule(ctx: Context) {
+        private fun schedule(ctx: Context, id: Int, delay: Long) {
             val scheduler = ctx.getSystemService(JobScheduler::class.java) ?: return
-            val info = JobInfo.Builder(JOB_ID, ComponentName(ctx, CalendarJob::class.java))
-                .setMinimumLatency(DELAY_MS)
-                .setOverrideDeadline(DELAY_MS + LATEST_MS)
+            val info = JobInfo.Builder(id, ComponentName(ctx, CalendarJob::class.java))
+                .setMinimumLatency(delay)
+                .setOverrideDeadline(delay + LATEST_MS)
                 .build()
             scheduler.schedule(info)
         }
+
+        fun schedule(ctx: Context) = schedule(ctx, JOB_ID, DELAY_MS)
+
+        /** A run after [delay], to look again at events read as gone. */
+        fun scheduleRecheck(ctx: Context, delay: Long) = schedule(ctx, RECHECK_ID, delay)
     }
 }

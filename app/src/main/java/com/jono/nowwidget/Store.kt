@@ -10,6 +10,9 @@ import com.jono.nowwidget.core.Act
 import com.jono.nowwidget.core.BindLink
 import com.jono.nowwidget.core.BindNote
 import com.jono.nowwidget.core.CalRecord
+import com.jono.nowwidget.core.CalRecordCodec
+import com.jono.nowwidget.core.CalRef
+import com.jono.nowwidget.core.CalendarSetup
 import com.jono.nowwidget.core.Daylio
 import com.jono.nowwidget.core.DaylioData
 import com.jono.nowwidget.core.DiaryDay
@@ -115,6 +118,8 @@ object Store {
     /** Records of events left in a calendar that's no longer a log calendar (for "Remove log events from …"). */
     const val CALENDAR_LEFT = "calendar-left"
     private const val CALENDAR_TEST = "calendar-test"
+    /** Records of events edited outside Now: never touched or replaced again (key stays taken). */
+    private const val CALENDAR_RELEASED = "calendar-released"
 
     /** Every export target a change marks dirty: one place marks them all. */
     private val TARGETS = listOf(OBSIDIAN, CALENDAR)
@@ -949,33 +954,54 @@ object Store {
 
     private fun remote(calendarId: Long, eventId: Long) = "$calendarId:$eventId"
 
+    private fun parseRemote(remote: String): Pair<Long, Long>? {
+        val parts = remote.split(':')
+        val cal = parts.getOrNull(0)?.toLongOrNull() ?: return null
+        val ev = parts.getOrNull(1)?.toLongOrNull() ?: return null
+        return cal to ev
+    }
+
+    /** Rows of (local_key, remote_id, content_hash). [keyFromHash]: the key is in the hash column (left and test records). */
     private fun readRecords(c: Cursor, keyFromHash: Boolean): List<CalRecord> {
         val out = ArrayList<CalRecord>()
         while (c.moveToNext()) {
-            val parts = c.getString(1).split(':')
-            val cal = parts.getOrNull(0)?.toLongOrNull() ?: continue
-            val ev = parts.getOrNull(1)?.toLongOrNull() ?: continue
+            val (cal, ev) = parseRemote(c.getString(1)) ?: continue
             out.add(
                 if (keyFromHash) CalRecord(c.getString(2), cal, ev, "")
-                else CalRecord(c.getString(0), cal, ev, c.getString(2))
+                else CalRecordCodec.read(c.getString(0), cal, ev, c.getString(2))
             )
         }
         return out
     }
 
-    /** The app's records of the events it wrote for one diary day (`2025-4-9`). */
-    fun calRecords(ctx: Context, dayKey: String): List<CalRecord> =
-        db(ctx).rawQuery(StoreSql.CAL_RECORDS_OF_DAY, arrayOf(CALENDAR, "$dayKey/", "${dayKey}0")).use { readRecords(it, false) }
+    private fun dayRange(dayKey: String) = arrayOf("$dayKey/", "${dayKey}0")
 
-    /** Every record, current ones and those left in old calendars. */
+    /** The app's records of the events it wrote for one diary day (`2025-4-9`), pending and suspect ones included. */
+    fun calRecords(ctx: Context, dayKey: String): List<CalRecord> =
+        db(ctx).rawQuery(StoreSql.CAL_RECORDS_OF_DAY, arrayOf(CALENDAR) + dayRange(dayKey)).use { readRecords(it, false) }
+
+    /** Keys of one day's events that were edited outside Now. */
+    fun releasedKeys(ctx: Context, dayKey: String): Set<String> =
+        db(ctx).rawQuery(StoreSql.CAL_RECORDS_OF_DAY, arrayOf(CALENDAR_RELEASED) + dayRange(dayKey)).use { c ->
+            val out = HashSet<String>()
+            while (c.moveToNext()) out.add(c.getString(0))
+            out
+        }
+
+    fun releasedCount(ctx: Context): Int =
+        db(ctx).rawQuery("SELECT COUNT(*) FROM export_state WHERE target = ?", args(CALENDAR_RELEASED)).use { c ->
+            if (c.moveToFirst()) c.getInt(0) else 0
+        }
+
+    /** Every current record (not the pending ones). */
     fun allCalRecords(ctx: Context): List<CalRecord> =
-        db(ctx).rawQuery(StoreSql.CAL_RECORDS_ALL, args(CALENDAR)).use { readRecords(it, false) }
+        db(ctx).rawQuery(StoreSql.CAL_RECORDS_ALL, args(CALENDAR)).use { readRecords(it, false) }.filter { !it.pending }
 
     fun leftCalRecords(ctx: Context): List<CalRecord> =
         db(ctx).rawQuery(StoreSql.CAL_RECORDS_ALL, args(CALENDAR_LEFT)).use { readRecords(it, true) }
 
     fun saveCalRecord(ctx: Context, r: CalRecord) {
-        db(ctx).execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(CALENDAR, r.key, remote(r.calendarId, r.eventId), r.hash, System.currentTimeMillis()))
+        db(ctx).execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(CALENDAR, r.key, remote(r.calendarId, r.eventId), CalRecordCodec.hashField(r), System.currentTimeMillis()))
     }
 
     fun dropCalRecord(ctx: Context, key: String) {
@@ -991,34 +1017,45 @@ object Store {
         }
     }
 
+    /** Edited outside Now: the record moves to the released list, which keeps its key from being written again. */
+    fun releaseCalRecord(ctx: Context, r: CalRecord, why: String) {
+        tx(ctx) { d ->
+            d.execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(CALENDAR_RELEASED, r.key, remote(r.calendarId, r.eventId), why, System.currentTimeMillis()))
+            d.execSQL(StoreSql.CAL_RECORD_DELETE, arrayOf<Any>(CALENDAR, r.key))
+        }
+    }
+
     fun dropLeftRecord(ctx: Context, r: CalRecord) {
         db(ctx).execSQL(StoreSql.CAL_RECORD_DELETE, arrayOf<Any>(CALENDAR_LEFT, remote(r.calendarId, r.eventId)))
     }
 
-    /** The "Test calendar" event, if one is recorded (its key is the marker it was written with). */
-    fun testRecord(ctx: Context): CalRecord? =
-        db(ctx).rawQuery(StoreSql.CAL_RECORDS_ALL, args(CALENDAR_TEST)).use { readRecords(it, true) }.firstOrNull()
+    /** Every "Test calendar" event recorded (each one's key is the marker it was written with). */
+    fun testRecords(ctx: Context): List<CalRecord> =
+        db(ctx).rawQuery(StoreSql.CAL_RECORDS_ALL, args(CALENDAR_TEST)).use { readRecords(it, true) }
 
-    fun saveTestRecord(ctx: Context, r: CalRecord?) {
-        db(ctx).execSQL(StoreSql.CAL_RECORD_DELETE, arrayOf<Any>(CALENDAR_TEST, "test"))
-        if (r != null) {
-            db(ctx).execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(CALENDAR_TEST, "test", remote(r.calendarId, r.eventId), r.key, System.currentTimeMillis()))
-        }
+    fun addTestRecord(ctx: Context, r: CalRecord) {
+        db(ctx).execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(CALENDAR_TEST, r.key, remote(r.calendarId, r.eventId), r.key, System.currentTimeMillis()))
+    }
+
+    fun dropTestRecord(ctx: Context, key: String) {
+        db(ctx).execSQL(StoreSql.CAL_RECORD_DELETE, arrayOf<Any>(CALENDAR_TEST, key))
     }
 
     // --- Areas: which of your calendars each group maps to ---
 
-    /** Group ('' for ungrouped) to the calendar id it maps to; null means no area (no color). */
-    fun groupAreas(ctx: Context): Map<String, Long?> {
-        val out = HashMap<String, Long?>()
+    /** Group ('' for ungrouped) to the calendar it maps to, with its identity; null means no area (no color). */
+    fun groupAreas(ctx: Context): Map<String, CalRef?> {
+        val out = HashMap<String, CalRef?>()
         db(ctx).rawQuery(StoreSql.GROUP_AREAS, null).use { c ->
-            while (c.moveToNext()) out[c.getString(0)] = c.getString(1).toLongOrNull()
+            while (c.moveToNext()) out[c.getString(0)] = CalRef.decode(c.getString(1))
         }
         return out
     }
 
-    fun setGroupArea(ctx: Context, group: String, calendarId: Long?) {
-        db(ctx).execSQL(StoreSql.GROUP_AREA_SET, arrayOf<Any>(group, calendarId?.toString() ?: ""))
+    fun setGroupArea(ctx: Context, group: String, ref: CalRef?) {
+        db(ctx).execSQL(StoreSql.GROUP_AREA_SET, arrayOf<Any>(group, ref?.encode() ?: ""))
+        // Per-area log calendars of areas nothing maps to any more are dropped.
+        Prefs.setCalAreaLogs(ctx, CalendarSetup.prune(Prefs.calAreaLogs(ctx), groupAreas(ctx)))
         markCalendarWrittenDirty(ctx)
     }
 
@@ -1314,26 +1351,24 @@ object Prefs {
     fun calOn(ctx: Context): Boolean = p(ctx).getBoolean("cal_on", false)
     fun setCalOn(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("cal_on", on).apply()
 
-    /** The log calendar (with one per area, the one for anything that has no area of its own). -1: none. */
-    fun calLog(ctx: Context): Long = p(ctx).getLong("cal_log", -1L)
-    fun setCalLog(ctx: Context, id: Long) = p(ctx).edit().putLong("cal_log", id).apply()
+    /** The log calendar (with one per area, the one for anything that has no area of its own), with its identity. */
+    fun calLog(ctx: Context): CalRef? = CalRef.decode(p(ctx).getString("cal_log_ref", null))
+    fun setCalLog(ctx: Context, ref: CalRef?) = p(ctx).edit().putString("cal_log_ref", ref?.encode()).apply()
 
     /** One log calendar per area instead of one for everything. */
     fun calPerArea(ctx: Context): Boolean = p(ctx).getBoolean("cal_per_area", false)
     fun setCalPerArea(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("cal_per_area", on).apply()
 
-    /** With one log calendar per area: area calendar id to its log calendar id. */
-    fun calAreaLogs(ctx: Context): Map<Long, Long> =
-        (p(ctx).getString("cal_area_logs", "") ?: "").split(',').mapNotNull { pair ->
-            val a = pair.substringBefore(':').toLongOrNull()
-            val b = pair.substringAfter(':', "").toLongOrNull()
-            if (a != null && b != null) a to b else null
-        }.toMap()
+    /** With one log calendar per area: area identity key to its log calendar. */
+    fun calAreaLogs(ctx: Context): Map<String, CalRef> = CalendarSetup.decodeAreaLogs(p(ctx).getString("cal_area_logs_v2", ""))
+    fun setCalAreaLogs(ctx: Context, m: Map<String, CalRef>) =
+        p(ctx).edit().putString("cal_area_logs_v2", CalendarSetup.encodeAreaLogs(m)).apply()
 
-    fun setCalAreaLog(ctx: Context, area: Long, log: Long?) {
-        val m = HashMap(calAreaLogs(ctx))
-        if (log == null) m.remove(area) else m[area] = log
-        p(ctx).edit().putString("cal_area_logs", m.entries.joinToString(",") { "${it.key}:${it.value}" }).apply()
+    /** Color keys an account's calendar refused, as "account key<RS>color key": never tried again. */
+    fun calRefusedColors(ctx: Context): Set<String> = p(ctx).getStringSet("cal_refused_colors", emptySet())?.toSet() ?: emptySet()
+    fun addCalRefusedColor(ctx: Context, accountKey: String, colorKey: String) {
+        val next = calRefusedColors(ctx) + (accountKey + CalRef.SEP_PAIR + colorKey)
+        p(ctx).edit().putStringSet("cal_refused_colors", next).apply()
     }
 
     /** Planned events move their activity to the first button. */

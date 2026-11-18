@@ -105,6 +105,11 @@
             android:name=".CalendarJob"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE" />
+        <!-- Redraws the widget when a planned event starts or ends (its activity gets the first button). -->
+        <service
+            android:name=".NudgeJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
         <!-- App-icon long-press "Claude session" shortcut (ClaudeLink.syncShortcut) opens this. -->
         <activity
             android:name=".ClaudeLinkActivity"

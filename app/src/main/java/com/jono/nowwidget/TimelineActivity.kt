@@ -260,11 +260,15 @@ class TimelineActivity : Activity() {
             val g = acts[s.entry.activityId]?.group ?: ""
             AreaSpan(setup.areaOf(g), s.from, s.to)
         }
-        val c = PlannedVsActual.compare(planned, actual, from, to)
+        // Today counts only up to now: what's still planned later hasn't been missed yet.
+        val now = System.currentTimeMillis()
+        val upTo = minOf(to, now)
+        val c = PlannedVsActual.compare(planned, actual, from, upTo)
         val match = c.match
         plannedBox.addView(TextView(this).apply {
-            text = if (match == null) "Nothing planned in your area calendars." else
-                "Planned " + Fmt.dur(c.plannedMs) + " · as planned " + Fmt.dur(c.matchedMs) + " (" + Math.round(match * 100) + "%)"
+            text = if (match == null) (if (planned.isEmpty()) "Nothing planned in your area calendars." else "Nothing planned before now.") else
+                (if (upTo < to) "So far: planned " else "Planned ") + Fmt.dur(c.plannedMs) + " · as planned " + Fmt.dur(c.matchedMs) +
+                    " (" + Math.round(match * 100) + "%)"
             textSize = 15f
             setPadding(0, dp(6), 0, dp(4))
         })

@@ -7,29 +7,12 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.database.Cursor
 import android.provider.CalendarContract
+import com.jono.nowwidget.core.CalIdentity
+import com.jono.nowwidget.core.CalProvider
+import com.jono.nowwidget.core.CalRow
 import com.jono.nowwidget.core.DesiredEvent
 import com.jono.nowwidget.core.PlannedEvent
 import com.jono.nowwidget.core.SeenEvent
-
-/** One of the calendars on the phone. */
-class CalInfo(
-    val id: Long,
-    val name: String,
-    val account: String,
-    val accountType: String,
-    val color: Int,
-    val access: Int,
-    val visible: Boolean,
-    val synced: Boolean,
-) {
-    /** The app can add events to it. */
-    val writable: Boolean get() = access >= CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR
-
-    /** A calendar only on this phone: events in it never reach Google. */
-    val local: Boolean get() = accountType == CalendarContract.ACCOUNT_TYPE_LOCAL
-
-    val label: String get() = name.ifBlank { "Calendar $id" }
-}
 
 /** What the test event looked like when it was read back. */
 class ReadBack(val calendarId: Long, val title: String, val colorKey: String?, val color: Int?, val deleted: Boolean)
@@ -45,7 +28,7 @@ object CalendarAccess {
 
     private fun Cursor.str(i: Int): String = if (isNull(i)) "" else (getString(i) ?: "")
 
-    fun calendars(ctx: Context): List<CalInfo> {
+    fun calendars(ctx: Context): List<CalRow> {
         val proj = arrayOf(
             CalendarContract.Calendars._ID,
             CalendarContract.Calendars.CALENDAR_DISPLAY_NAME,
@@ -55,13 +38,15 @@ object CalendarAccess {
             CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL,
             CalendarContract.Calendars.VISIBLE,
             CalendarContract.Calendars.SYNC_EVENTS,
+            CalendarContract.Calendars._SYNC_ID,
         )
-        val out = ArrayList<CalInfo>()
+        val out = ArrayList<CalRow>()
         ctx.contentResolver.query(CalendarContract.Calendars.CONTENT_URI, proj, null, null, null)?.use { c ->
             while (c.moveToNext()) {
                 out.add(
-                    CalInfo(
-                        c.getLong(0), c.str(1), c.str(2), c.str(3),
+                    CalRow(
+                        c.getLong(0),
+                        CalIdentity(c.str(2), c.str(3), if (c.isNull(8)) null else c.str(8).ifEmpty { null }, c.str(1)),
                         if (c.isNull(4)) 0xFF9A9A9A.toInt() else c.getInt(4),
                         if (c.isNull(5)) 0 else c.getInt(5),
                         !c.isNull(6) && c.getInt(6) != 0,
@@ -93,9 +78,14 @@ object CalendarAccess {
         CalendarContract.Events.CALENDAR_ID,
         CalendarContract.Events.DESCRIPTION,
         CalendarContract.Events.DELETED,
+        CalendarContract.Events.DTSTART,
+        CalendarContract.Events.DTEND,
     )
 
-    private fun seen(c: Cursor) = SeenEvent(c.getLong(0), c.getLong(1), c.str(2), !c.isNull(3) && c.getInt(3) != 0)
+    private fun seen(c: Cursor) = SeenEvent(
+        c.getLong(0), c.getLong(1), c.str(2), !c.isNull(3) && c.getInt(3) != 0,
+        if (c.isNull(4)) 0L else c.getLong(4), if (c.isNull(5)) 0L else c.getLong(5),
+    )
 
     /** These events as they are now, by id. An id that isn't there is gone. */
     fun read(ctx: Context, ids: Collection<Long>): Map<Long, SeenEvent> {
@@ -186,7 +176,9 @@ object CalendarAccess {
 
     /**
      * Planned events in [from, to) from these calendars, read-only. Recurring events come in as
-     * their instances. All-day, cancelled and declined events are left out.
+     * their instances. All-day, cancelled and declined events are left out. Read with our own
+     * selection (not Instances.query, which only returns calendars shown in the calendar app), so
+     * a mapped calendar you hid still counts.
      */
     fun planned(ctx: Context, calendars: Set<Long>, from: Long, to: Long): List<PlannedEvent> {
         if (calendars.isEmpty()) return emptyList()
@@ -200,7 +192,11 @@ object CalendarAccess {
             CalendarContract.Instances.SELF_ATTENDEE_STATUS,
         )
         val out = ArrayList<PlannedEvent>()
-        CalendarContract.Instances.query(ctx.contentResolver, proj, from, to)?.use { c ->
+        val b = CalendarContract.Instances.CONTENT_URI.buildUpon()
+        ContentUris.appendId(b, from)
+        ContentUris.appendId(b, to)
+        val sel = CalendarContract.Instances.CALENDAR_ID + " IN (" + calendars.joinToString(",") + ")"
+        ctx.contentResolver.query(b.build(), proj, sel, null, CalendarContract.Instances.BEGIN)?.use { c ->
             while (c.moveToNext()) {
                 val cal = c.getLong(1)
                 if (cal !in calendars) continue
@@ -214,4 +210,13 @@ object CalendarAccess {
         }
         return out.sortedBy { it.from }
     }
+}
+
+/** [CalendarAccess] for the core export logic. */
+class RealCalProvider(private val ctx: Context) : CalProvider {
+    override fun read(ids: Collection<Long>) = CalendarAccess.read(ctx, ids)
+    override fun findMarked(calendarId: Long, from: Long, to: Long) = CalendarAccess.findMarked(ctx, calendarId, from, to)
+    override fun insert(d: DesiredEvent) = CalendarAccess.insert(ctx, d)
+    override fun update(eventId: Long, d: DesiredEvent) = CalendarAccess.update(ctx, eventId, d)
+    override fun delete(eventId: Long) = CalendarAccess.delete(ctx, eventId)
 }

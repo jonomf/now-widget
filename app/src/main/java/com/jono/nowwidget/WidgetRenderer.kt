@@ -168,7 +168,7 @@ object WidgetRenderer {
             val planned = PlannedCache.current(ctx, now)
             if (PlannedNudge.happeningNow(planned, now).isEmpty()) return null
             val usable = buttons.map { it.id }.toSet()
-            val areas = Store.groupAreas(ctx)
+            val areas = PlannedCache.areas
             val areaOf = byId.mapValues { (_, a) -> areas[a.group.trim()] }
             val fallback = PlannedNudge.mostUsed(Store.actUses(ctx, now).filterKeys { it in usable }, areaOf)
             PlannedNudge.pick(now, planned, Prefs.calRules(ctx), fallback, usable)?.let { byId[it] }

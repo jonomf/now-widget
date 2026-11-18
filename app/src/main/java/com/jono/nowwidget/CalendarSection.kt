@@ -18,7 +18,12 @@ import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import com.jono.nowwidget.core.CalRef
+import com.jono.nowwidget.core.CalRow
+import com.jono.nowwidget.core.CalendarMatch
+import com.jono.nowwidget.core.CalendarSetup
 import com.jono.nowwidget.core.KeywordRule
+import com.jono.nowwidget.core.ResolvedSetup
 
 /**
  * The "Calendar" part of the settings screen: calendar access (explained before Android asks),
@@ -52,7 +57,7 @@ class CalendarSection(private val a: Activity) {
     private val list = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
 
     /** Your calendars, read in the background; null until the first read. */
-    @Volatile private var cals: List<CalInfo>? = null
+    @Volatile private var cals: List<CalRow>? = null
     @Volatile private var loadError = ""
     private var loading = false
     private var drawing = false
@@ -87,7 +92,7 @@ class CalendarSection(private val a: Activity) {
         export.setPadding(0, a.dp(10), 0, a.dp(10))
         export.setOnCheckedChangeListener { _, on ->
             if (drawing) return@setOnCheckedChangeListener
-            if (on && Prefs.calLog(a) <= 0L) {
+            if (on && Prefs.calLog(a) == null) {
                 Toast.makeText(a, "Choose a log calendar first", Toast.LENGTH_SHORT).show()
                 refresh()
                 return@setOnCheckedChangeListener
@@ -100,7 +105,8 @@ class CalendarSection(private val a: Activity) {
         setup.addView(export)
         setup.addView(a.note(
             "Events hold your notes and moods. Anyone you share the log calendar with can read them. " +
-                "The app only ever changes or deletes events it made itself, in your log calendars. Edits you make in Google Calendar aren't read back."
+                "The app only ever changes or deletes events it made itself, in your log calendars. Edits you make in Google Calendar aren't read back. " +
+                "Deleting a log event in Google Calendar doesn't stick, because the log on this phone is the source: to remove one, delete the entry in Now's timeline."
         ))
         writeNow.text = "Write changes now"
         writeNow.setOnClickListener { CalendarExport.writeNow(a) }
@@ -109,8 +115,8 @@ class CalendarSection(private val a: Activity) {
         setup.addView(a.label("Check it works"))
         testButton.text = "Test calendar"
         testButton.setOnClickListener { CalendarExport.test(a) }
-        deleteTest.text = "Delete test event"
-        deleteTest.setOnClickListener { CalendarExport.deleteTest(a) }
+        deleteTest.text = "Delete test events"
+        deleteTest.setOnClickListener { CalendarExport.deleteTests(a) }
         setup.addView(testButton)
         setup.addView(deleteTest)
         setup.addView(testResult)
@@ -164,9 +170,23 @@ class CalendarSection(private val a: Activity) {
         }.start()
     }
 
-    private fun cal(id: Long): CalInfo? = cals?.firstOrNull { it.id == id }
+    private fun cal(id: Long): CalRow? = cals?.firstOrNull { it.id == id }
 
     private fun name(id: Long): String = cal(id)?.label ?: if (cals == null) "…" else "a calendar that's gone"
+
+    /** A picked calendar by its identity: its name now, or its old name and a note when it can't be found. */
+    private fun name(ref: CalRef): String {
+        val all = cals ?: return ref.identity.name.ifBlank { "…" }
+        return CalendarMatch.resolve(ref, all)?.label ?: (ref.identity.name + " (not found: pick it again)")
+    }
+
+    private fun color(ref: CalRef?): Int? = ref?.let { r -> cals?.let { CalendarMatch.resolve(r, it)?.color } }
+
+    /** The settings against the calendars read last (pure; no calendar reads here). */
+    private fun resolved(): ResolvedSetup? {
+        val all = cals ?: return null
+        return CalendarSetup.resolve(all, Prefs.calLog(a), Prefs.calPerArea(a), Store.groupAreas(a), Prefs.calAreaLogs(a))
+    }
 
     /** Redraws everything. Call on the main thread. */
     fun refresh() {
@@ -199,6 +219,7 @@ class CalendarSection(private val a: Activity) {
 
         val lines = ArrayList<String>()
         val log = Prefs.calLog(a)
+        val res = resolved()
         if (Prefs.calOn(a)) {
             val last = Prefs.calLastExport(a)
             lines.add(if (last == 0L) "Writing to the calendar. Nothing written yet." else "Last written: " + Fmt.day(last) + ", " + Fmt.time(a, last))
@@ -207,26 +228,35 @@ class CalendarSection(private val a: Activity) {
         }
         if (CalendarExport.busy.isNotBlank()) lines.add(CalendarExport.busy)
         if (loadError.isNotBlank()) lines.add("Couldn't read your calendars: $loadError")
+        // The settings' own problem (a calendar gone, swapped or unsynced) first: it stops all writing.
+        val setupProblem = res?.problem?.takeIf { log != null }
+        if (setupProblem != null) lines.add("Problem: $setupProblem")
         val problem = Prefs.calError(a)
-        if (problem.isNotBlank()) lines.add("Problem: $problem")
+        if (problem.isNotBlank() && problem != setupProblem) lines.add("Problem: $problem")
+        res?.unsyncedAreas?.forEach { lines.add(it.label + " isn't synced on this phone, so its planned events can't be read.") }
+        val released = Store.releasedCount(a)
+        if (released > 0) {
+            lines.add("$released log event" + (if (released == 1) " was" else "s were") + " edited outside Now and " +
+                (if (released == 1) "is" else "are") + " no longer updated.")
+        }
         val info = Prefs.calInfo(a)
         if (info.isNotBlank()) lines.add(info)
         status.text = lines.joinToString("\n")
 
-        logButton.text = if (log > 0L) "Log calendar: " + name(log) else "Choose the log calendar"
+        logButton.text = if (log != null) "Log calendar: " + name(log) else "Choose the log calendar"
         perArea.isChecked = Prefs.calPerArea(a)
         export.isChecked = Prefs.calOn(a)
         val idle = CalendarExport.busy.isBlank()
         writeNow.isEnabled = idle && CalendarExport.configured(a)
         writeNow.visibility = if (Prefs.calOn(a)) View.VISIBLE else View.GONE
-        testButton.isEnabled = idle && log > 0L
+        testButton.isEnabled = idle && log != null
         deleteTest.isEnabled = idle
         val test = Prefs.calTest(a)
         testResult.text = if (test.isBlank()) "Writes one 5-minute event ending now into the log calendar and says what happened." else "Last test: $test"
         nudge.isChecked = Prefs.calNudge(a)
 
         drawAreas()
-        drawOld()
+        drawOld(res)
         drawRules()
         drawList()
     }
@@ -241,26 +271,27 @@ class CalendarSection(private val a: Activity) {
         val map = Store.groupAreas(a)
         val per = Prefs.calPerArea(a)
         val logs = Prefs.calAreaLogs(a)
+        val main = Prefs.calLog(a)
         groups().forEach { g ->
             val area = map[g]
             val label = (g.ifEmpty { "Ungrouped" }) + " → " + if (area == null) (if (g.isEmpty()) "no color" else "no area") else name(area)
-            areas.addView(colorRow(label, area?.let { cal(it)?.color }) { pickArea(g) })
+            areas.addView(colorRow(label, color(area)) { pickArea(g) })
         }
         if (per) {
-            map.values.filterNotNull().distinct().forEach { area ->
-                val l = logs[area]
+            map.values.filterNotNull().distinctBy { it.identity.key }.forEach { area ->
+                val l = logs[area.identity.key]
+                val mainName = if (main == null) "no log calendar yet" else name(main) + " (the log calendar)"
                 areas.addView(colorRow(
-                    name(area) + " events go to " + (if (l == null) name(Prefs.calLog(a)) + " (the log calendar)" else name(l)),
-                    cal(l ?: Prefs.calLog(a))?.color,
+                    name(area) + " events go to " + (if (l == null) mainName else name(l)),
+                    color(l ?: main),
                 ) { pickAreaLog(area) })
             }
         }
     }
 
-    private fun drawOld() {
+    private fun drawOld(res: ResolvedSetup?) {
         old.removeAllViews()
-        val logs = (listOf(Prefs.calLog(a)) + if (Prefs.calPerArea(a)) Prefs.calAreaLogs(a).values else emptyList()).toSet()
-        CalendarExport.oldCalendars(a, logs).forEach { (id, n) ->
+        CalendarExport.oldCalendars(a, res).forEach { (id, n) ->
             val label = name(id)
             old.addView(button("Remove log events from $label") { confirmRemove(id, label, n) })
         }
@@ -328,7 +359,7 @@ class CalendarSection(private val a: Activity) {
     }
 
     /** A list of calendars to pick from, with their dots. [none] adds a first row that picks null. */
-    private fun pickCalendar(title: String, only: (CalInfo) -> Boolean, none: String?, onPick: (CalInfo?) -> Unit) {
+    private fun pickCalendar(title: String, only: (CalRow) -> Boolean, none: String?, onPick: (CalRow?) -> Unit) {
         val all = cals
         if (all == null) {
             Toast.makeText(a, "Still reading your calendars", Toast.LENGTH_SHORT).show()
@@ -359,27 +390,31 @@ class CalendarSection(private val a: Activity) {
         dialog.show()
     }
 
+    /**
+     * Every log calendar pick (the main one and per area) goes through here: the shared-calendar
+     * caution always, and a warning when it's phone-only, not synced, or one of your areas.
+     */
+    private fun confirmLog(c: CalRow, use: () -> Unit) {
+        val areaKeys = Store.groupAreas(a).values.filterNotNull().map { it.identity.key }.toSet()
+        val warnings = ArrayList<String>()
+        if (c.local) warnings.add("${c.label} is only on this phone, so its events never reach Google.")
+        if (!c.synced || !c.visible) warnings.add("${c.label} isn't synced and shown on this phone, so nothing will be written until it is (Google Calendar app → Settings).")
+        if (c.identity.key in areaKeys) warnings.add("${c.label} is one of your areas. The log usually goes into a calendar of its own, like Log.")
+        warnings.add("Log events hold your notes and moods: anyone you share ${c.label} with can read them.")
+        AlertDialog.Builder(a)
+            .setTitle("Log into ${c.label}?")
+            .setMessage(warnings.joinToString("\n\n"))
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Use it") { _, _ -> use() }
+            .show()
+    }
+
     private fun pickLog() {
         pickCalendar("Log calendar", { it.writable }, null) { c ->
             if (c == null) return@pickCalendar
-            if (c.id == Prefs.calLog(a)) return@pickCalendar
-            fun use() {
-                Prefs.setCalLog(a, c.id)
+            confirmLog(c) {
+                Prefs.setCalLog(a, c.ref())
                 settingsChanged()
-            }
-            val areaIds = Store.groupAreas(a).values.filterNotNull()
-            when {
-                c.local -> AlertDialog.Builder(a)
-                    .setMessage("${c.label} is only on this phone, so its events never reach Google. Use it anyway?")
-                    .setNegativeButton("Cancel", null)
-                    .setPositiveButton("Use it") { _, _ -> use() }
-                    .show()
-                c.id in areaIds -> AlertDialog.Builder(a)
-                    .setMessage("${c.label} is one of your areas. The log usually goes into a calendar of its own, like Log. Use it anyway?")
-                    .setNegativeButton("Cancel", null)
-                    .setPositiveButton("Use it") { _, _ -> use() }
-                    .show()
-                else -> use()
             }
         }
     }
@@ -387,15 +422,20 @@ class CalendarSection(private val a: Activity) {
     private fun pickArea(group: String) {
         val label = group.ifEmpty { "Ungrouped activities" }
         pickCalendar(label, { true }, if (group.isEmpty()) "No color" else "No area") { c ->
-            Store.setGroupArea(a, group, c?.id)
+            Store.setGroupArea(a, group, c?.ref())
             settingsChanged()
         }
     }
 
-    private fun pickAreaLog(area: Long) {
-        pickCalendar("Log calendar for " + name(area), { it.writable }, "The main log calendar") { c ->
-            Prefs.setCalAreaLog(a, area, c?.id)
+    private fun pickAreaLog(area: CalRef) {
+        fun set(ref: CalRef?) {
+            val m = HashMap(Prefs.calAreaLogs(a))
+            if (ref == null) m.remove(area.identity.key) else m[area.identity.key] = ref
+            Prefs.setCalAreaLogs(a, CalendarSetup.prune(m, Store.groupAreas(a)))
             settingsChanged()
+        }
+        pickCalendar("Log calendar for " + name(area), { it.writable }, "The main log calendar") { c ->
+            if (c == null) set(null) else confirmLog(c) { set(c.ref()) }
         }
     }
 
