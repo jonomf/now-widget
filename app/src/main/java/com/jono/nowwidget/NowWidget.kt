@@ -11,6 +11,7 @@ import android.net.Uri
 class NowWidget : AppWidgetProvider() {
 
     override fun onUpdate(ctx: Context, mgr: AppWidgetManager, ids: IntArray) {
+        ClaudeLink.syncShortcut(ctx)
         WidgetRenderer.refresh(ctx)
     }
 

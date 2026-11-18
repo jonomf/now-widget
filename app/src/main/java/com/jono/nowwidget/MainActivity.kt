@@ -157,6 +157,7 @@ class MainActivity : Activity() {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(RELEASES_URL)))
         })
 
+        ClaudeLink.addTopButton(this, col)
         ClaudeLink.addSection(this, col) { WidgetRenderer.refresh(this) }
 
         setContentView(ScrollView(this).apply { addView(col) })

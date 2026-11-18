@@ -91,5 +91,13 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+        <!-- App-icon long-press "Claude session" shortcut (ClaudeLink.syncShortcut) opens this. -->
+        <activity
+            android:name=".ClaudeLinkActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.NoDisplay" />
     </application>
 </manifest>
