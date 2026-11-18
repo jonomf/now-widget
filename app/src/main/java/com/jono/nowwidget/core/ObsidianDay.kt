@@ -109,14 +109,15 @@ object ObsidianDay {
         else -> items.dropLast(1).joinToString(", ") + " and " + items.last()
     }
 
-    private class Merged(var span: DaySpan, val entries: MutableSet<Long>)
+    /** A run of back-to-back spans of one activity with the same links, and the entries in it. */
+    class Merged(var span: DaySpan, val entries: MutableSet<Long>)
 
     private fun sameThings(a: DaySpan, b: DaySpan): Boolean =
         a.activityId == b.activityId && a.people.toSet() == b.people.toSet() &&
             a.places.toSet() == b.places.toSet() && a.context == b.context
 
-    /** Back-to-back spans of the same activity with the same links become one. */
-    private fun merge(spans: List<DaySpan>): List<Merged> {
+    /** Back-to-back spans of the same activity with the same links become one. Also used by the calendar export. */
+    fun merge(spans: List<DaySpan>): List<Merged> {
         val out = ArrayList<Merged>()
         spans.sortedBy { it.from }.forEach { s ->
             val last = out.lastOrNull()
@@ -158,7 +159,7 @@ object ObsidianDay {
     }
 
     /** The words after a moment's time, possibly over several lines; null when there's nothing. */
-    private fun momentText(m: DayMoment): String? {
+    fun momentText(m: DayMoment): String? {
         val title = m.title.replace("\r", " ").replace("\n", " ").trim()
         val head = listOf(if (title.isEmpty()) "" else "**$title**", feelingPart(m)).filter { it.isNotEmpty() }
             .joinToString(" ")

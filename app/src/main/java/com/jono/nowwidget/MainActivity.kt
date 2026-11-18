@@ -38,9 +38,11 @@ class MainActivity : Activity() {
     private lateinit var updateStatus: TextView
     private lateinit var updaterButton: Button
     private lateinit var obsidian: ObsidianSection
+    private lateinit var calendar: CalendarSection
     private var periodDays = 1
     private val redraw: () -> Unit = { runOnUiThread { refresh() } }
     private val redrawObsidian: () -> Unit = { runOnUiThread { obsidian.refresh() } }
+    private val redrawCalendar: () -> Unit = { runOnUiThread { calendar.refresh() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -125,7 +127,7 @@ class MainActivity : Activity() {
 
         // --- Data ---
         col.addView(heading("Your data"))
-        col.addView(note("Everything stays on this phone. The app has no internet permission."))
+        col.addView(note("The app has no internet permission. Your log stays on this phone, unless you turn on the calendar export below: then Google's own sync uploads the log calendar."))
         col.addView(button("Export CSV") { startExport(REQUEST_EXPORT, "now-", "") })
         col.addView(button("Export check-ins (CSV)") { startExport(REQUEST_EXPORT_MOMENTS, "now-checkins-", "") })
         col.addView(button("Export feelings (Daylio CSV)") { startExport(REQUEST_EXPORT_FEELINGS, "now-feelings-", "") })
@@ -135,6 +137,10 @@ class MainActivity : Activity() {
         // --- Obsidian ---
         obsidian = ObsidianSection(this)
         col.addView(obsidian.view)
+
+        // --- Calendar ---
+        calendar = CalendarSection(this)
+        col.addView(calendar.view)
 
         // --- Home screen ---
         col.addView(heading("Your widgets"))
@@ -174,18 +180,24 @@ class MainActivity : Activity() {
         super.onResume()
         WidgetRenderer.listeners.add(redraw)
         ObsidianExport.listeners.add(redrawObsidian)
+        CalendarExport.listeners.add(redrawCalendar)
         WidgetRenderer.refresh(this)
         ObsidianExport.onAppOpen(this)
+        CalendarExport.onAppOpen(this)
+        // Access may have been changed in App info while away.
+        calendar.reload()
     }
 
     override fun onPause() {
         WidgetRenderer.listeners.remove(redraw)
         ObsidianExport.listeners.remove(redrawObsidian)
+        CalendarExport.listeners.remove(redrawCalendar)
         super.onPause()
     }
 
     override fun onRequestPermissionsResult(code: Int, permissions: Array<out String>, results: IntArray) {
         super.onRequestPermissionsResult(code, permissions, results)
+        calendar.onPermission(code, results)
         WidgetRenderer.refresh(this)
     }
 
@@ -201,6 +213,7 @@ class MainActivity : Activity() {
     private fun refresh() {
         val s = WidgetRenderer.snapshot(this)
         obsidian.refresh()
+        calendar.refresh()
         nowLine.text = s.act?.let { a ->
             a.emoji + " " + a.name + "  " + Fmt.dur(s.now - (s.cur?.start ?: s.now))
         } ?: "Nothing right now"

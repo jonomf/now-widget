@@ -9,12 +9,15 @@ import android.database.sqlite.SQLiteOpenHelper
 import com.jono.nowwidget.core.Act
 import com.jono.nowwidget.core.BindLink
 import com.jono.nowwidget.core.BindNote
+import com.jono.nowwidget.core.CalRecord
 import com.jono.nowwidget.core.Daylio
 import com.jono.nowwidget.core.DaylioData
 import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.Entry
 import com.jono.nowwidget.core.FeelingTag
 import com.jono.nowwidget.core.IDLE
+import com.jono.nowwidget.core.KeywordRule
+import com.jono.nowwidget.core.PlannedNudge
 import com.jono.nowwidget.core.DirtyDays
 import com.jono.nowwidget.core.Link
 import com.jono.nowwidget.core.LinkBinding
@@ -108,6 +111,13 @@ data class VaultMerge(val created: Int, val matched: Int, val removed: Int)
 object Store {
     private const val DOUBLE_TAP_MS = 700L
     private const val OBSIDIAN = "obsidian"
+    const val CALENDAR = "calendar"
+    /** Records of events left in a calendar that's no longer a log calendar (for "Remove log events from …"). */
+    const val CALENDAR_LEFT = "calendar-left"
+    private const val CALENDAR_TEST = "calendar-test"
+
+    /** Every export target a change marks dirty: one place marks them all. */
+    private val TARGETS = listOf(OBSIDIAN, CALENDAR)
 
     /** A change reaching further than this many diary days isn't marked past it; "Write all days" covers the rest. */
     private const val MAX_DIRTY_DAYS = 62
@@ -821,7 +831,7 @@ object Store {
         }
         progress(data.entries.size)
         importedDays.forEach { markDay(d, it) }
-        if (importedDays.isNotEmpty()) ObsidianExport.changed(ctx)
+        if (importedDays.isNotEmpty()) exportersChanged(ctx)
         ImportResult(added, there, skipped, firstTs, lastTs)
     }
 
@@ -843,15 +853,22 @@ object Store {
 
     // --- Obsidian export: which days changed ---
 
+    /** Marks the day dirty for every export target (Obsidian and Calendar). */
     private fun markDay(d: SQLiteDatabase, dayStart: Long) {
         val (y, m, day) = DiaryDay.date(dayStart)
-        d.execSQL(StoreSql.MARK_DAY_DIRTY, arrayOf<Any>(OBSIDIAN, ObsidianDay.key(y, m, day)))
+        TARGETS.forEach { d.execSQL(StoreSql.MARK_DAY_DIRTY, arrayOf<Any>(it, ObsidianDay.key(y, m, day))) }
+    }
+
+    /** Tells every exporter that days were marked. Never throws. */
+    private fun exportersChanged(ctx: Context) {
+        ObsidianExport.changed(ctx)
+        CalendarExport.changed(ctx)
     }
 
     /** A change to one moment touches the diary day it sits in. */
     private fun dirtyDay(ctx: Context, ts: Long) {
         markDay(db(ctx), DiaryDay.start(ts))
-        ObsidianExport.changed(ctx)
+        exportersChanged(ctx)
     }
 
     /**
@@ -866,16 +883,27 @@ object Store {
         val last = DiaryDay.start(maxOf(next ?: System.currentTimeMillis(), ts))
         val first = DiaryDay.start(minOf(prev ?: ts, ts))
         DirtyDays.reach(DiaryDay.start(ts), first, last, MAX_DIRTY_DAYS).forEach { markDay(d, it) }
-        ObsidianExport.changed(ctx)
+        exportersChanged(ctx)
     }
 
-    /** A rename or regroup can change every note already written. */
+    /** A rename or regroup can change every note and event already written. */
     private fun markWrittenDirty(ctx: Context) {
         tx(ctx) { d ->
             d.execSQL(StoreSql.MARK_WRITTEN_BUMP, arrayOf<Any>(OBSIDIAN, OBSIDIAN))
             d.execSQL(StoreSql.MARK_WRITTEN_ADD, arrayOf<Any>(OBSIDIAN, OBSIDIAN))
+            d.execSQL(StoreSql.CAL_MARK_WRITTEN_BUMP, arrayOf<Any>(CALENDAR, CALENDAR))
+            d.execSQL(StoreSql.CAL_MARK_WRITTEN_ADD, arrayOf<Any>(CALENDAR, CALENDAR))
         }
-        ObsidianExport.changed(ctx)
+        exportersChanged(ctx)
+    }
+
+    /** A calendar setting changed (log calendar, areas, colors): every day with events is redone. */
+    fun markCalendarWrittenDirty(ctx: Context) {
+        tx(ctx) { d ->
+            d.execSQL(StoreSql.CAL_MARK_WRITTEN_BUMP, arrayOf<Any>(CALENDAR, CALENDAR))
+            d.execSQL(StoreSql.CAL_MARK_WRITTEN_ADD, arrayOf<Any>(CALENDAR, CALENDAR))
+        }
+        CalendarExport.changed(ctx)
     }
 
     /** Marks today's diary day dirty (its running activity and totals move with the clock). */
@@ -887,24 +915,120 @@ object Store {
         markDay(db(ctx), dayStart)
     }
 
+    /** Marks these days dirty for one target only (turning the calendar export on). */
+    fun markDaysDirty(ctx: Context, target: String, dayStarts: List<Long>) {
+        tx(ctx) { d ->
+            dayStarts.forEach { dayStart ->
+                val (y, m, day) = DiaryDay.date(dayStart)
+                d.execSQL(StoreSql.MARK_DAY_DIRTY, arrayOf<Any>(target, ObsidianDay.key(y, m, day)))
+            }
+        }
+    }
+
     /** Day keys (`2025-4-9`) waiting to be written, each with its change counter. */
-    fun dirtyDays(ctx: Context): Map<String, Int> {
+    fun dirtyDays(ctx: Context, target: String = OBSIDIAN): Map<String, Int> {
         val out = LinkedHashMap<String, Int>()
-        db(ctx).rawQuery(StoreSql.DIRTY_DAYS, args(OBSIDIAN)).use { c ->
+        db(ctx).rawQuery(StoreSql.DIRTY_DAYS, args(target)).use { c ->
             while (c.moveToNext()) out[c.getString(0)] = c.getInt(1)
         }
         return out
     }
 
     /** The day's change counter: 0 when it's clean. */
-    fun dayGen(ctx: Context, key: String): Int =
-        db(ctx).rawQuery(StoreSql.DAY_GEN, args(OBSIDIAN, key)).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+    fun dayGen(ctx: Context, key: String, target: String = OBSIDIAN): Int =
+        db(ctx).rawQuery(StoreSql.DAY_GEN, args(target, key)).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
 
     /** Clears the dirty mark only if the day hasn't been marked again since it was at [gen]. */
-    fun clearDirtyIf(ctx: Context, key: String, gen: Int): Boolean {
+    fun clearDirtyIf(ctx: Context, key: String, gen: Int, target: String = OBSIDIAN): Boolean {
         val d = db(ctx)
-        d.execSQL(StoreSql.CLEAR_DAY_DIRTY, arrayOf<Any>(OBSIDIAN, key, gen))
-        return dayGen(ctx, key) == 0
+        d.execSQL(StoreSql.CLEAR_DAY_DIRTY, arrayOf<Any>(target, key, gen))
+        return dayGen(ctx, key, target) == 0
+    }
+
+    // --- Calendar export records (export_state, target 'calendar') ---
+
+    private fun remote(calendarId: Long, eventId: Long) = "$calendarId:$eventId"
+
+    private fun readRecords(c: Cursor, keyFromHash: Boolean): List<CalRecord> {
+        val out = ArrayList<CalRecord>()
+        while (c.moveToNext()) {
+            val parts = c.getString(1).split(':')
+            val cal = parts.getOrNull(0)?.toLongOrNull() ?: continue
+            val ev = parts.getOrNull(1)?.toLongOrNull() ?: continue
+            out.add(
+                if (keyFromHash) CalRecord(c.getString(2), cal, ev, "")
+                else CalRecord(c.getString(0), cal, ev, c.getString(2))
+            )
+        }
+        return out
+    }
+
+    /** The app's records of the events it wrote for one diary day (`2025-4-9`). */
+    fun calRecords(ctx: Context, dayKey: String): List<CalRecord> =
+        db(ctx).rawQuery(StoreSql.CAL_RECORDS_OF_DAY, arrayOf(CALENDAR, "$dayKey/", "${dayKey}0")).use { readRecords(it, false) }
+
+    /** Every record, current ones and those left in old calendars. */
+    fun allCalRecords(ctx: Context): List<CalRecord> =
+        db(ctx).rawQuery(StoreSql.CAL_RECORDS_ALL, args(CALENDAR)).use { readRecords(it, false) }
+
+    fun leftCalRecords(ctx: Context): List<CalRecord> =
+        db(ctx).rawQuery(StoreSql.CAL_RECORDS_ALL, args(CALENDAR_LEFT)).use { readRecords(it, true) }
+
+    fun saveCalRecord(ctx: Context, r: CalRecord) {
+        db(ctx).execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(CALENDAR, r.key, remote(r.calendarId, r.eventId), r.hash, System.currentTimeMillis()))
+    }
+
+    fun dropCalRecord(ctx: Context, key: String) {
+        db(ctx).execSQL(StoreSql.CAL_RECORD_DELETE, arrayOf<Any>(CALENDAR, key))
+    }
+
+    /** The event stays where it is; its record moves aside so "Remove log events from …" can still find it. */
+    fun leaveCalRecord(ctx: Context, r: CalRecord) {
+        tx(ctx) { d ->
+            val id = remote(r.calendarId, r.eventId)
+            d.execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(CALENDAR_LEFT, id, id, r.key, System.currentTimeMillis()))
+            d.execSQL(StoreSql.CAL_RECORD_DELETE, arrayOf<Any>(CALENDAR, r.key))
+        }
+    }
+
+    fun dropLeftRecord(ctx: Context, r: CalRecord) {
+        db(ctx).execSQL(StoreSql.CAL_RECORD_DELETE, arrayOf<Any>(CALENDAR_LEFT, remote(r.calendarId, r.eventId)))
+    }
+
+    /** The "Test calendar" event, if one is recorded (its key is the marker it was written with). */
+    fun testRecord(ctx: Context): CalRecord? =
+        db(ctx).rawQuery(StoreSql.CAL_RECORDS_ALL, args(CALENDAR_TEST)).use { readRecords(it, true) }.firstOrNull()
+
+    fun saveTestRecord(ctx: Context, r: CalRecord?) {
+        db(ctx).execSQL(StoreSql.CAL_RECORD_DELETE, arrayOf<Any>(CALENDAR_TEST, "test"))
+        if (r != null) {
+            db(ctx).execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(CALENDAR_TEST, "test", remote(r.calendarId, r.eventId), r.key, System.currentTimeMillis()))
+        }
+    }
+
+    // --- Areas: which of your calendars each group maps to ---
+
+    /** Group ('' for ungrouped) to the calendar id it maps to; null means no area (no color). */
+    fun groupAreas(ctx: Context): Map<String, Long?> {
+        val out = HashMap<String, Long?>()
+        db(ctx).rawQuery(StoreSql.GROUP_AREAS, null).use { c ->
+            while (c.moveToNext()) out[c.getString(0)] = c.getString(1).toLongOrNull()
+        }
+        return out
+    }
+
+    fun setGroupArea(ctx: Context, group: String, calendarId: Long?) {
+        db(ctx).execSQL(StoreSql.GROUP_AREA_SET, arrayOf<Any>(group, calendarId?.toString() ?: ""))
+        markCalendarWrittenDirty(ctx)
+    }
+
+    /** How often each activity was started in the last 8 weeks. */
+    fun actUses(ctx: Context, now: Long): Map<Long, Int> {
+        val out = HashMap<Long, Int>()
+        db(ctx).rawQuery(StoreSql.ACT_USES, args(now - 56 * DAY_MS)).use { c ->
+            while (c.moveToNext()) out[c.getLong(0)] = c.getInt(1)
+        }
+        return out
     }
 
     fun exportHash(ctx: Context, key: String): String? =
@@ -1183,4 +1307,57 @@ object Prefs {
     /** Days made only of Daylio-imported check-ins are written too (off by default). */
     fun exportImported(ctx: Context): Boolean = p(ctx).getBoolean("export_imported", false)
     fun setExportImported(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("export_imported", on).apply()
+
+    // --- Calendar ---
+
+    /** Writing the log into the calendar: off until you turn it on. */
+    fun calOn(ctx: Context): Boolean = p(ctx).getBoolean("cal_on", false)
+    fun setCalOn(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("cal_on", on).apply()
+
+    /** The log calendar (with one per area, the one for anything that has no area of its own). -1: none. */
+    fun calLog(ctx: Context): Long = p(ctx).getLong("cal_log", -1L)
+    fun setCalLog(ctx: Context, id: Long) = p(ctx).edit().putLong("cal_log", id).apply()
+
+    /** One log calendar per area instead of one for everything. */
+    fun calPerArea(ctx: Context): Boolean = p(ctx).getBoolean("cal_per_area", false)
+    fun setCalPerArea(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("cal_per_area", on).apply()
+
+    /** With one log calendar per area: area calendar id to its log calendar id. */
+    fun calAreaLogs(ctx: Context): Map<Long, Long> =
+        (p(ctx).getString("cal_area_logs", "") ?: "").split(',').mapNotNull { pair ->
+            val a = pair.substringBefore(':').toLongOrNull()
+            val b = pair.substringAfter(':', "").toLongOrNull()
+            if (a != null && b != null) a to b else null
+        }.toMap()
+
+    fun setCalAreaLog(ctx: Context, area: Long, log: Long?) {
+        val m = HashMap(calAreaLogs(ctx))
+        if (log == null) m.remove(area) else m[area] = log
+        p(ctx).edit().putString("cal_area_logs", m.entries.joinToString(",") { "${it.key}:${it.value}" }).apply()
+    }
+
+    /** Planned events move their activity to the first button. */
+    fun calNudge(ctx: Context): Boolean = p(ctx).getBoolean("cal_nudge", true)
+    fun setCalNudge(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("cal_nudge", on).apply()
+
+    fun calRules(ctx: Context): List<KeywordRule> = PlannedNudge.decode(p(ctx).getString("cal_rules", ""))
+    fun setCalRules(ctx: Context, rules: List<KeywordRule>) = p(ctx).edit().putString("cal_rules", PlannedNudge.encode(rules)).apply()
+
+    fun calError(ctx: Context): String = p(ctx).getString("cal_error", "") ?: ""
+    fun setCalError(ctx: Context, v: String) = p(ctx).edit().putString("cal_error", v).apply()
+
+    fun calLastExport(ctx: Context): Long = p(ctx).getLong("cal_last_export", 0L)
+    fun setCalLastExport(ctx: Context, v: Long) = p(ctx).edit().putLong("cal_last_export", v).apply()
+
+    /** The outcome of the last "Remove log events from …", in words. */
+    fun calInfo(ctx: Context): String = p(ctx).getString("cal_info", "") ?: ""
+    fun setCalInfo(ctx: Context, v: String) = p(ctx).edit().putString("cal_info", v).apply()
+
+    /** What the last "Test calendar" found, in words. */
+    fun calTest(ctx: Context): String = p(ctx).getString("cal_test", "") ?: ""
+    fun setCalTest(ctx: Context, v: String) = p(ctx).edit().putString("cal_test", v).apply()
+
+    /** Calendar access was asked for at least once (a denial after that needs App info). */
+    fun calAsked(ctx: Context): Boolean = p(ctx).getBoolean("cal_asked", false)
+    fun setCalAsked(ctx: Context) = p(ctx).edit().putBoolean("cal_asked", true).apply()
 }

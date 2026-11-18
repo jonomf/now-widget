@@ -7,6 +7,7 @@ import android.app.TimePickerDialog
 import android.os.Bundle
 import android.text.format.DateFormat
 import android.view.Gravity
+import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -14,6 +15,10 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
+import com.jono.nowwidget.core.AreaSpan
+import com.jono.nowwidget.core.PlannedEvent
+import com.jono.nowwidget.core.PlannedVsActual
 import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.Entry
 import com.jono.nowwidget.core.FeelingTag
@@ -31,7 +36,13 @@ class TimelineActivity : Activity() {
     private lateinit var dayLabel: TextView
     private lateinit var ribbon: RibbonView
     private lateinit var list: LinearLayout
+    private lateinit var plannedButton: Button
+    private lateinit var plannedRibbon: RibbonView
+    private lateinit var plannedBox: LinearLayout
     private var day = Fmt.today()
+    private var plannedOn = false
+    /** Which load is the latest, so an old one finishing late draws nothing. */
+    private var plannedLoad = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,6 +88,25 @@ class TimelineActivity : Activity() {
             setOnClickListener { jump(System.currentTimeMillis()) }
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         col.addView(jumps)
+
+        plannedButton = Button(this).apply {
+            setOnClickListener {
+                if (!CalendarAccess.granted(this@TimelineActivity)) {
+                    Toast.makeText(this@TimelineActivity, "Turn on calendar access in Settings → Calendar first", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                plannedOn = !plannedOn
+                draw()
+            }
+        }
+        col.addView(plannedButton)
+        plannedRibbon = RibbonView(this)
+        col.addView(
+            plannedRibbon,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(10)).apply { topMargin = dp(8) },
+        )
+        plannedBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(plannedBox)
 
         ribbon = RibbonView(this)
         col.addView(
@@ -147,6 +177,7 @@ class TimelineActivity : Activity() {
         val tags = Store.allTags(this).associateBy { it.id }
         dayLabel.text = Fmt.day(day)
         ribbon.set(spans, acts.mapValues { it.value.color }, day, end)
+        drawPlanned(spans, acts)
 
         val shown = spans.map { it.entry.id }.toSet()
         val byEntry = moments.filter { it.entryId != null && it.entryId in shown }.groupBy { it.entryId }
@@ -166,6 +197,94 @@ class TimelineActivity : Activity() {
                 }
                 is Moment -> list.addView(momentRow(item, moods, tags, indent = false))
             }
+        }
+    }
+
+    /**
+     * Planned vs actual: the day's planned events from your area calendars (read in the background)
+     * on a thin ribbon above the actual one, per-area totals and the match figure.
+     */
+    private fun drawPlanned(spans: List<Span>, acts: Map<Long, com.jono.nowwidget.core.Act>) {
+        plannedButton.text = if (plannedOn) "Planned: on" else "Planned: off"
+        plannedBox.removeAllViews()
+        val load = ++plannedLoad
+        if (!plannedOn) {
+            plannedRibbon.visibility = View.GONE
+            return
+        }
+        plannedRibbon.visibility = View.VISIBLE
+        plannedRibbon.set(emptyList(), emptyMap(), day, DiaryDay.add(day, 1))
+        plannedBox.addView(note("Reading your calendars…"))
+        val from = day
+        val to = DiaryDay.add(day, 1)
+        val app = applicationContext
+        Thread {
+            val result = try {
+                val setup = CalSetup(app)
+                Triple(setup, CalendarAccess.planned(app, setup.areaCalendars, from, to), "")
+            } catch (e: Exception) {
+                Triple(null, emptyList(), e.message ?: e.javaClass.simpleName)
+            }
+            runOnUiThread {
+                if (load == plannedLoad && !isFinishing) showPlanned(result.first, result.second, result.third, spans, acts, from, to)
+            }
+        }.start()
+    }
+
+    private fun showPlanned(
+        setup: CalSetup?,
+        planned: List<PlannedEvent>,
+        error: String,
+        spans: List<Span>,
+        acts: Map<Long, com.jono.nowwidget.core.Act>,
+        from: Long,
+        to: Long,
+    ) {
+        plannedBox.removeAllViews()
+        if (setup == null) {
+            plannedBox.addView(note("Couldn't read your calendars: $error"))
+            return
+        }
+        if (setup.areaCalendars.isEmpty()) {
+            plannedBox.addView(note("Map your activity groups to your calendars first (Settings → Calendar → Areas)."))
+            return
+        }
+        val colorOf = { id: Long? -> id?.let { setup.calendars[it]?.color } ?: 0xFF9A9A9A.toInt() }
+        // The ribbon: fake entries, one per planned event, colored by its calendar.
+        plannedRibbon.set(
+            planned.mapIndexed { i, p -> Span(Entry(i.toLong(), i.toLong(), p.from), maxOf(p.from, from), minOf(p.to, to)) },
+            planned.mapIndexed { i, p -> i.toLong() to colorOf(p.calendarId) }.toMap(),
+            from, to,
+        )
+        val actual = spans.map { s ->
+            val g = acts[s.entry.activityId]?.group ?: ""
+            AreaSpan(setup.areaOf(g), s.from, s.to)
+        }
+        val c = PlannedVsActual.compare(planned, actual, from, to)
+        val match = c.match
+        plannedBox.addView(TextView(this).apply {
+            text = if (match == null) "Nothing planned in your area calendars." else
+                "Planned " + Fmt.dur(c.plannedMs) + " · as planned " + Fmt.dur(c.matchedMs) + " (" + Math.round(match * 100) + "%)"
+            textSize = 15f
+            setPadding(0, dp(6), 0, dp(4))
+        })
+        c.areas.forEach { t ->
+            val name = t.area?.let { setup.calendars[it]?.label } ?: "No area"
+            plannedBox.addView(TextView(this).apply {
+                text = "● " + name + "   planned " + Fmt.dur(t.plannedMs) + " · did " + Fmt.dur(t.actualMs)
+                textSize = 13f
+                setTextColor(colorOf(t.area))
+                setPadding(0, dp(2), 0, dp(2))
+            })
+        }
+        planned.forEach { p ->
+            plannedBox.addView(TextView(this).apply {
+                text = Fmt.time(this@TimelineActivity, p.from) + "–" + Fmt.time(this@TimelineActivity, p.to) + "  " + p.title +
+                    " · " + (setup.calendars[p.calendarId]?.label ?: "")
+                textSize = 13f
+                alpha = 0.7f
+                setPadding(0, dp(2), 0, dp(2))
+            })
         }
     }
 

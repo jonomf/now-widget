@@ -66,5 +66,25 @@ object StoreSql {
     const val LINK_SOURCE_ADD = "INSERT OR IGNORE INTO link_source (link_id, source) VALUES (?, 'vault')"
     const val LINK_USES = "SELECT link_id, COUNT(*) FROM entry_link GROUP BY link_id"
     const val CONTEXT_USES = "SELECT context_id, COUNT(*) FROM entry WHERE context_id IS NOT NULL GROUP BY context_id"
+
+    /**
+     * Calendar export records live in export_state too: target 'calendar', local_key the event key
+     * (`2026-11-18/e42`, the day then the run's first entry), remote_id `calendarId:eventId`. A day's
+     * records are the keys from `day/` up to (not including) `day0`, since '0' follows '/' (target, from, to).
+     */
+    const val CAL_RECORDS_OF_DAY = "SELECT local_key, remote_id, content_hash FROM export_state WHERE target = ? AND local_key >= ? AND local_key < ?"
+    const val CAL_RECORDS_ALL = "SELECT local_key, remote_id, content_hash FROM export_state WHERE target = ?"
+    const val CAL_RECORD_DELETE = "DELETE FROM export_state WHERE target = ? AND local_key = ?"
+
+    /** A settings change can change every event already written: their days become dirty (target, target), then (target, target). */
+    const val CAL_MARK_WRITTEN_BUMP = "UPDATE export_day SET dirty = dirty + 1 WHERE target = ? AND day IN (SELECT substr(local_key, 1, instr(local_key, '/') - 1) FROM export_state WHERE target = ? AND instr(local_key, '/') > 1)"
+    const val CAL_MARK_WRITTEN_ADD = "INSERT OR IGNORE INTO export_day (target, day, dirty) SELECT DISTINCT ?, substr(local_key, 1, instr(local_key, '/') - 1), 1 FROM export_state WHERE target = ? AND instr(local_key, '/') > 1"
+
+    /** Which of your calendars each activity group maps to (its area); '' is ungrouped, a blank calendar is none. */
+    const val GROUP_AREAS = "SELECT grp, calendar FROM group_calendar"
+    const val GROUP_AREA_SET = "INSERT OR REPLACE INTO group_calendar (grp, calendar) VALUES (?, ?)"
+
+    /** How often each activity was started since a time (ms), idle left out. */
+    const val ACT_USES = "SELECT activity_id, COUNT(*) FROM entry WHERE start_ms >= ? AND activity_id <> 0 GROUP BY activity_id"
     // END STORE_SQL
 }

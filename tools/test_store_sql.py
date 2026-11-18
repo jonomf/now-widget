@@ -286,6 +286,48 @@ def test_change_reach():
           'an entry at the same start does not narrow the range')
 
 
+# --- Calendar export records ---
+
+def test_calendar_records():
+    db = fresh_v2()
+    save = SQL['SAVE_HASH']
+    for key, ev in (('2026-11-1/e5', 1), ('2026-11-1/e9', 2), ('2026-11-10/e3', 3), ('2026-11-18/e7', 4), ('2026-11-1', 99)):
+        db.execute(save, ('calendar', key, f'10:{ev}', 'h', 1))
+    db.execute(save, ('obsidian', '2026-11-1', 'doc', 'h', 1))
+    db.execute(save, ('calendar-left', '10:50', '10:50', '2026-11-1/e1', 1))
+    rows = lambda day: sorted(r[0] for r in db.execute(SQL['CAL_RECORDS_OF_DAY'], ('calendar', day + '/', day + '0')))
+    check(rows('2026-11-1') == ['2026-11-1/e5', '2026-11-1/e9'], f"a day's records only, not 11-10 or 11-18: {rows('2026-11-1')}")
+    check(rows('2026-11-10') == ['2026-11-10/e3'], '11-10 alone')
+    check(rows('2026-11-18') == ['2026-11-18/e7'], '11-18 alone')
+    check(rows('2026-11-2') == [], 'a day with none')
+    check(len(db.execute(SQL['CAL_RECORDS_ALL'], ('calendar',)).fetchall()) == 5, 'all of one target')
+    check(db.execute(SQL['CAL_RECORDS_ALL'], ('calendar-left',)).fetchall() == [('10:50', '10:50', '2026-11-1/e1')],
+          'left records are their own target')
+
+    # A settings change marks only days with calendar records dirty, for the calendar only.
+    db.execute("INSERT INTO export_day (target, day, dirty) VALUES ('calendar', '2026-11-1', 2), ('obsidian', '2026-11-10', 0)")
+    db.execute(SQL['CAL_MARK_WRITTEN_BUMP'], ('calendar', 'calendar'))
+    db.execute(SQL['CAL_MARK_WRITTEN_ADD'], ('calendar', 'calendar'))
+    dirty = dict(db.execute(SQL['DIRTY_DAYS'], ('calendar',)).fetchall())
+    check(dirty == {'2026-11-1': 3, '2026-11-10': 1, '2026-11-18': 1}, f'days with events dirty, a dirty one bumped once: {dirty}')
+    check(one(db, "SELECT dirty FROM export_day WHERE target = 'obsidian'") == 0, 'Obsidian days untouched')
+
+    db.execute(SQL['CAL_RECORD_DELETE'], ('calendar', '2026-11-1/e5'))
+    check(rows('2026-11-1') == ['2026-11-1/e9'], 'one record dropped')
+    check(one(db, "SELECT COUNT(*) FROM export_state WHERE target = 'calendar-left'") == 1, 'the left record stays')
+
+
+def test_group_areas_and_uses():
+    db = fresh_v2()
+    db.execute(SQL['GROUP_AREA_SET'], ('Work', '12'))
+    db.execute(SQL['GROUP_AREA_SET'], ('Work', '13'))
+    db.execute(SQL['GROUP_AREA_SET'], ('', ''))
+    check(dict(db.execute(SQL['GROUP_AREAS']).fetchall()) == {'Work': '13', '': ''}, 'one area per group, replaced')
+    for i, (act, ms) in enumerate(((1, 100), (1, 200), (2, 300), (0, 400), (3, 50))):
+        db.execute('INSERT INTO entry (id, activity_id, start_ms) VALUES (?, ?, ?)', (i + 1, act, ms))
+    check(dict(db.execute(SQL['ACT_USES'], (100,)).fetchall()) == {1: 2, 2: 1}, 'uses since a time, idle left out')
+
+
 # --- Vault index ---
 
 def test_vault_index():
@@ -361,13 +403,15 @@ def main():
     test_import()
     test_export_days()
     test_change_reach()
+    test_calendar_records()
+    test_group_areas_and_uses()
     test_vault_index()
     test_alias_and_rename_sql()
     test_v2_links_stay_chips_after_a_scan()
     print(f'{len(failures)} failures' if failures else
           f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; '
           'import dedupe (re-import, same-minute notes, native feelings); rollback on failure; '
-          'export dirty days, change counters and hashes; change reach; vault cache; alias binding and rename; v2 links stay chips')
+          'export dirty days, change counters and hashes; change reach; calendar records by day; areas; vault cache; alias binding and rename; v2 links stay chips')
     sys.exit(1 if failures else 0)
 
 

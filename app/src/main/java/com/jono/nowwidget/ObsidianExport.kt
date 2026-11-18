@@ -212,7 +212,8 @@ object ObsidianExport {
 
     // --- Writing ---
 
-    private class Lookups(ctx: Context) {
+    /** Names for ids, loaded once per run. The calendar export uses it too. */
+    class Lookups(ctx: Context) {
         val acts = Store.allActs(ctx).associateBy { it.id }
         val links = Store.allLinks(ctx).associateBy { it.id }
         val moods = Store.allMoods(ctx).associateBy { it.id }
@@ -225,7 +226,8 @@ object ObsidianExport {
         }.toMap()
     }
 
-    private fun dayData(ctx: Context, lk: Lookups, dayStart: Long, now: Long): DayData {
+    /** Everything one diary day's note (or calendar events) is made from. */
+    fun dayData(ctx: Context, lk: Lookups, dayStart: Long, now: Long): DayData {
         val end = DiaryDay.add(dayStart, 1)
         val spans = Store.spans(ctx, dayStart, end)
         val moments = Store.moments(ctx, dayStart, end)
@@ -267,7 +269,7 @@ object ObsidianExport {
         return DayData(y, m, d, daySpans, dayMoments, TimeZone.getDefault(), lk.notes)
     }
 
-    private fun parseKey(key: String): Triple<Int, Int, Int>? {
+    fun parseKey(key: String): Triple<Int, Int, Int>? {
         val p = key.split("-")
         if (p.size != 3) return null
         val y = p[0].toIntOrNull() ?: return null

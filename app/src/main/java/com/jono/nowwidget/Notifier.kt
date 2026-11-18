@@ -65,7 +65,7 @@ object Notifier {
     private fun collapsed(ctx: Context, s: Snapshot): RemoteViews {
         val rv = RemoteViews(ctx.packageName, R.layout.notif_collapsed)
         rv.removeAllViews(R.id.row)
-        Store.picks(s.buttons, s.act, Prefs.lockButtons(ctx), s.scores, s.smart).forEach { a ->
+        s.picks(Prefs.lockButtons(ctx)).forEach { a ->
             rv.addView(R.id.row, WidgetRenderer.slot(ctx, R.layout.slot, a, a.id == s.act?.id))
         }
         return rv

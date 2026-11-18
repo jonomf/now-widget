@@ -38,6 +38,25 @@ object LogRules {
         return (ranked.take(room) + listOfNotNull(cur)).sortedBy { it.pos }
     }
 
+    /**
+     * A planned event suggests [nudged]: it goes to the first button. If it wasn't among [picks],
+     * it takes the place of the last pick that isn't the current activity, so there are never more
+     * than [n]. Nothing changes when it's what you're doing already or there's no room.
+     */
+    fun withNudge(picks: List<Act>, nudged: Act?, cur: Act?, n: Int): List<Act> {
+        if (nudged == null || n <= 0 || nudged.id == cur?.id) return picks
+        val rest = picks.filter { it.id != nudged.id }.toMutableList()
+        if (rest.size == picks.size) {
+            // Not there yet: make room.
+            while (rest.size >= n) {
+                val drop = rest.indexOfLast { it.id != cur?.id }
+                if (drop < 0) return picks
+                rest.removeAt(drop)
+            }
+        }
+        return listOf(nudged) + rest
+    }
+
     /** What a tap on an activity button does. */
     sealed class Tap {
         /** Start [activityId] at [at]; that ends whatever came before. */

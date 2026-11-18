@@ -5,6 +5,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Puts that notification back after the phone restarts. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Calendar: writes the log as events into the calendars you pick (Google's sync uploads them)
+         and reads planned events. Only ever changes events the app made itself. Asked for in Settings. -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
 
     <!-- The Widget Updater, which checks for new builds and installs them. -->
     <queries>
@@ -94,6 +98,11 @@
         <!-- Writes the Obsidian notes about a minute after the last change (plain JobScheduler). -->
         <service
             android:name=".ExportJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <!-- Writes the calendar events about a minute after the last change. -->
+        <service
+            android:name=".CalendarJob"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE" />
         <!-- App-icon long-press "Claude session" shortcut (ClaudeLink.syncShortcut) opens this. -->

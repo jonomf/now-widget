@@ -17,6 +17,8 @@ import com.jono.nowwidget.core.Act
 import com.jono.nowwidget.core.Entry
 import com.jono.nowwidget.core.Link
 import com.jono.nowwidget.core.LinkKind
+import com.jono.nowwidget.core.LogRules
+import com.jono.nowwidget.core.PlannedNudge
 import java.util.concurrent.CopyOnWriteArraySet
 
 /** Everything a redraw needs, loaded once and shared by every layout and the notification. */
@@ -40,7 +42,12 @@ class Snapshot(
     val todayTotal: Long,
     val sinceText: String,
     val idleSince: Long?,
-)
+    /** What a planned event happening now suggests: it goes on the first button. */
+    val nudge: Act? = null,
+) {
+    /** The buttons for [n] slots: the usual picks, with the planned one first. */
+    fun picks(n: Int): List<Act> = LogRules.withNudge(Store.picks(buttons, act, n, scores, smart), nudge, act, n)
+}
 
 object WidgetRenderer {
 
@@ -128,11 +135,12 @@ object WidgetRenderer {
         val today = totals.entries
             .mapNotNull { (id, ms) -> byId[id]?.let { it to ms } }
             .sortedByDescending { it.second }
+        val buttons = acts.filter { it.show && !it.archived }
         return Snapshot(
             now = now,
             cur = cur,
             act = cur?.let { byId[it.activityId] },
-            buttons = acts.filter { it.show && !it.archived },
+            buttons = buttons,
             // Links the vault scan made are chips only once pinned or used; yours always are.
             people = links.filter { it.kind == LinkKind.PERSON && !it.archived && it.chip },
             places = links.filter { it.kind == LinkKind.PLACE && !it.archived && it.chip },
@@ -146,7 +154,27 @@ object WidgetRenderer {
             todayTotal = today.sumOf { it.second },
             sinceText = (cur?.start ?: idle)?.let { Fmt.since(ctx, it) } ?: "",
             idleSince = idle,
+            nudge = nudge(ctx, now, buttons, byId),
         )
+    }
+
+    /**
+     * The activity a planned event that's on now suggests, from the cached planned events (read in
+     * the background; never blocks a redraw). Null when nudges are off or nothing fits.
+     */
+    private fun nudge(ctx: Context, now: Long, buttons: List<Act>, byId: Map<Long, Act>): Act? {
+        return try {
+            if (!Prefs.calNudge(ctx)) return null
+            val planned = PlannedCache.current(ctx, now)
+            if (PlannedNudge.happeningNow(planned, now).isEmpty()) return null
+            val usable = buttons.map { it.id }.toSet()
+            val areas = Store.groupAreas(ctx)
+            val areaOf = byId.mapValues { (_, a) -> areas[a.group.trim()] }
+            val fallback = PlannedNudge.mostUsed(Store.actUses(ctx, now).filterKeys { it in usable }, areaOf)
+            PlannedNudge.pick(now, planned, Prefs.calRules(ctx), fallback, usable)?.let { byId[it] }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun build(ctx: Context, s: Snapshot): RemoteViews {
@@ -291,7 +319,7 @@ object WidgetRenderer {
     ) {
         // Android can reapply an update onto the views already showing, so always clear first.
         rv.removeAllViews(container)
-        val picks = Store.picks(s.buttons, s.act, cols * rows, s.scores, s.smart)
+        val picks = s.picks(cols * rows)
         picks.chunked(cols).forEach { chunk ->
             val row = RemoteViews(ctx.packageName, rowLayout)
             chunk.forEach { a -> row.addView(R.id.row, slot(ctx, slotLayout, a, a.id == s.act?.id)) }
