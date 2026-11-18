@@ -235,12 +235,15 @@ class TimelineActivity : Activity() {
         val isToday = day == Fmt.today()
         val acts = Store.allActs(this).filter { !it.archived || it.id == entry?.activityId }
         val allLinks = Store.allLinks(this)
+        // Links you made, pinned or have used are listed; any other one (a vault note) is found by typing.
         fun pickable(kind: String) = allLinks.filter {
-            it.kind == kind && (!it.archived || (entry != null && it.id in entry.links))
+            it.kind == kind && ((!it.archived && it.chip) || (entry != null && it.id in entry.links))
         }
         val people = pickable(LinkKind.PERSON)
         val places = pickable(LinkKind.PLACE)
-        val contexts = allLinks.filter { it.kind == LinkKind.CONTEXT && (!it.archived || it.id == entry?.contextId) }
+        val contexts = allLinks.filter {
+            it.kind == LinkKind.CONTEXT && ((!it.archived && it.chip) || it.id == entry?.contextId)
+        }
         if (acts.isEmpty()) return
 
         var start = entry?.start ?: if (isToday) System.currentTimeMillis() - 30 * 60_000L else day + 8 * 3_600_000L
@@ -270,32 +273,60 @@ class TimelineActivity : Activity() {
         box.addView(timeButton)
 
         val checks = ArrayList<Pair<Long, CheckBox>>()
-        fun addChecks(title: String, items: List<com.jono.nowwidget.core.Link>) {
-            if (items.isEmpty()) return
+        fun addChecks(title: String, items: List<com.jono.nowwidget.core.Link>, kind: String) {
             box.addView(label(title))
-            items.forEach { l ->
+            val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            box.addView(holder)
+            fun addOne(l: com.jono.nowwidget.core.Link, on: Boolean) {
                 val cb = CheckBox(this).apply {
                     text = l.badge + " " + l.title
-                    isChecked = entry != null && l.id in entry.links
+                    isChecked = on
                 }
-                box.addView(cb)
+                holder.addView(cb)
                 checks.add(l.id to cb)
             }
+            items.forEach { addOne(it, entry != null && it.id in entry.links) }
+            box.addView(Button(this).apply {
+                text = "Find a " + kindName(kind) + "…"
+                setOnClickListener {
+                    this@TimelineActivity.pickLink("Find or add a " + kindName(kind), setOf(kind), kind) { id ->
+                        val have = checks.firstOrNull { it.first == id }
+                        if (have != null) {
+                            have.second.isChecked = true
+                        } else {
+                            Store.allLinks(this@TimelineActivity).firstOrNull { it.id == id }?.let { addOne(it, true) }
+                        }
+                    }
+                }
+            })
         }
-        addChecks("With", people)
-        addChecks("Where", places)
+        addChecks("With", people, LinkKind.PERSON)
+        addChecks("Where", places, LinkKind.PLACE)
 
+        val contextItems = ArrayList(contexts)
         val contextSpinner = Spinner(this)
-        if (contexts.isNotEmpty()) {
-            box.addView(label("Context"))
+        fun showContexts(selectId: Long?) {
             contextSpinner.adapter = ArrayAdapter(
                 this,
                 android.R.layout.simple_spinner_dropdown_item,
-                listOf("None") + contexts.map { it.label },
+                listOf("None") + contextItems.map { it.label },
             )
-            contextSpinner.setSelection(contexts.indexOfFirst { it.id == entry?.contextId } + 1)
-            box.addView(contextSpinner)
+            contextSpinner.setSelection(contextItems.indexOfFirst { it.id == selectId } + 1)
         }
+        box.addView(label("Context"))
+        showContexts(entry?.contextId)
+        box.addView(contextSpinner)
+        box.addView(Button(this).apply {
+            text = "Find a context…"
+            setOnClickListener {
+                this@TimelineActivity.pickLink("Find or add a context", pickKinds(LinkKind.CONTEXT), LinkKind.CONTEXT) { id ->
+                    if (contextItems.none { it.id == id }) {
+                        Store.allLinks(this@TimelineActivity).firstOrNull { it.id == id }?.let { contextItems.add(it) }
+                    }
+                    showContexts(id)
+                }
+            }
+        })
 
         val b = AlertDialog.Builder(this)
             .setView(ScrollView(this).apply { addView(box) })
@@ -303,8 +334,7 @@ class TimelineActivity : Activity() {
             .setPositiveButton("Save") { _, _ ->
                 val act = acts[spinner.selectedItemPosition].id
                 val chosen = checks.filter { it.second.isChecked }.map { it.first }.toSet()
-                val ctxId = if (contexts.isEmpty()) entry?.contextId
-                else contexts.getOrNull(contextSpinner.selectedItemPosition - 1)?.id
+                val ctxId = contextItems.getOrNull(contextSpinner.selectedItemPosition - 1)?.id
                 if (entry == null) {
                     Store.addEntry(this, act, start, chosen, ctxId)
                 } else {

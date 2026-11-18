@@ -93,8 +93,13 @@ class ManageActivity : Activity() {
                 addButton.text = "Add " + kindName(kind)
                 val items = Store.allLinks(this).filter { it.kind == kind && !it.archived }
                 val ids = items.map { it.id }
+                val vault = ObsidianExport.configured(this)
                 items.forEachIndexed { i, l ->
-                    list.addView(row(l.badge + " " + l.title, "", null, i, ids, "link") { editLink(l) })
+                    val sub = listOfNotNull(
+                        if (vault) (if (l.inVault) "note in your vault" else "no note yet") else null,
+                        if (l.fromVault && !l.chip) "not on the widget" else null,
+                    ).joinToString(" · ")
+                    list.addView(row(l.badge + " " + l.title, sub, null, i, ids, "link") { editLink(l) })
                 }
             }
             MODE_MOODS -> {
@@ -283,6 +288,24 @@ class ManageActivity : Activity() {
             setSelection(kinds.indexOf(l?.kind ?: kind).coerceAtLeast(0))
         }
         box.addView(kindSpinner)
+        if (l == null) {
+            // A new one: matches from the vault come up as you type; choosing one fills in its title and kind.
+            val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            box.addView(rows)
+            LinkSuggester(this, name, rows, kinds.toSet(), 5) { id ->
+                Store.allLinks(this).firstOrNull { it.id == id }?.let { found ->
+                    name.setText(found.title)
+                    name.setSelection(found.title.length)
+                    kindSpinner.setSelection(kinds.indexOf(found.kind).coerceAtLeast(0))
+                }
+            }
+        }
+        // A link the vault made stays off the widget until you use it; this keeps it there.
+        val pinned = CheckBox(this).apply {
+            text = "Always show on the widget and in the 📝 box"
+            isChecked = l?.pinned ?: true
+        }
+        if (l != null && l.fromVault) box.addView(pinned)
 
         val b = AlertDialog.Builder(this)
             .setView(box)
@@ -291,7 +314,12 @@ class ManageActivity : Activity() {
                 val n = name.text.toString().trim()
                 if (n.isNotEmpty()) {
                     val k = kinds.getOrElse(kindSpinner.selectedItemPosition) { kind }
-                    Store.saveLink(this, l?.id, n, k, Fmt.firstGrapheme(emoji.text.toString()))
+                    val e = Fmt.firstGrapheme(emoji.text.toString())
+                    if (l == null) {
+                        Store.addLink(this, n, k, e)
+                    } else {
+                        Store.saveLink(this, l.id, n, k, e, if (l.fromVault) pinned.isChecked else null)
+                    }
                     changed()
                 }
             }

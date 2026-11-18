@@ -9,7 +9,7 @@ import org.junit.Test
 class SchemaTest {
     @Test
     fun oneStatementPerString() {
-        (Schema.create() + Schema.upgradeFrom1()).forEach { s ->
+        (Schema.create() + Schema.upgradeFrom1() + Schema.upgradeFrom2()).forEach { s ->
             assertFalse(s, s.contains(";"))
             assertTrue(s, s.startsWith("CREATE") || s.startsWith("INSERT") || s.startsWith("ALTER"))
         }
@@ -19,12 +19,14 @@ class SchemaTest {
     fun bothPathsMakeTheSameNewTables() {
         assertEquals(Schema.NEW_IN_V2, Schema.create().filter { it in Schema.NEW_IN_V2 })
         assertEquals(Schema.NEW_IN_V2, Schema.upgradeFrom1().take(Schema.NEW_IN_V2.size))
-        assertEquals(2, Schema.VERSION)
+        assertEquals(Schema.NEW_IN_V3, Schema.create().filter { it in Schema.NEW_IN_V3 })
+        assertEquals(Schema.NEW_IN_V3, Schema.upgradeFrom2())
+        assertEquals(3, Schema.VERSION)
     }
 
     @Test
     fun upgradeNeverDropsOrRewritesOldData() {
-        Schema.upgradeFrom1().forEach { s ->
+        (Schema.upgradeFrom1() + Schema.upgradeFrom2()).forEach { s ->
             val u = s.uppercase()
             assertFalse(s, u.startsWith("DROP") || u.startsWith("DELETE") || u.startsWith("UPDATE"))
             assertFalse(s, u.startsWith("INSERT INTO PERSON") || u.startsWith("INSERT INTO ENTRY "))

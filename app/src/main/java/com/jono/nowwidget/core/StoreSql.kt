@@ -31,5 +31,28 @@ object StoreSql {
     const val INSERT_IMPORTED = "INSERT INTO moment (ts, kind, title, text, mood_id, entry_id, source_key) VALUES (?, 'feeling', ?, ?, ?, NULL, ?)"
     const val INSERT_MOMENT_TAG = "INSERT INTO moment_tag (moment_id, tag_id) VALUES (?, ?)"
     const val INSERT_MOMENT_REF = "INSERT OR IGNORE INTO moment_ref (moment_id, kind, ref_id) VALUES (?, ?, ?)"
+
+    /** Obsidian export: a diary day is dirty after anything changes in it (target, day). */
+    const val MARK_DAY_DIRTY = "INSERT OR REPLACE INTO export_day (target, day, dirty) VALUES (?, ?, 1)"
+    const val CLEAR_DAY_DIRTY = "UPDATE export_day SET dirty = 0 WHERE target = ? AND day = ?"
+    const val DIRTY_DAYS = "SELECT day FROM export_day WHERE target = ? AND dirty = 1"
+
+    /** A rename or regroup can change every note already written: all of them become dirty (target, target). */
+    const val MARK_WRITTEN_DIRTY = "INSERT OR REPLACE INTO export_day (target, day, dirty) SELECT ?, local_key, 1 FROM export_state WHERE target = ?"
+    const val HASH_OF_DAY = "SELECT content_hash FROM export_state WHERE target = ? AND local_key = ?"
+    const val SAVE_HASH = "INSERT OR REPLACE INTO export_state (target, local_key, remote_id, content_hash, synced_at) VALUES (?, ?, ?, ?, ?)"
+
+    /** The entry just before and just after a time (ts, ts): which days a change at ts can reach. */
+    const val PREV_ENTRY_START = "SELECT MAX(start_ms) FROM entry WHERE start_ms < ?"
+    const val NEXT_ENTRY_START = "SELECT MIN(start_ms) FROM entry WHERE start_ms > ?"
+
+    /** Vault index: the cache, and how scan-made links are marked. */
+    const val VAULT_CACHE = "SELECT doc_id, name, modified, kind, link_id FROM vault_note"
+    const val VAULT_UPSERT = "INSERT OR REPLACE INTO vault_note (doc_id, name, modified, title, kind, aliases, link_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    const val VAULT_DELETE = "DELETE FROM vault_note WHERE doc_id = ?"
+    const val VAULT_ALIASES = "SELECT link_id, aliases FROM vault_note WHERE link_id IS NOT NULL AND aliases <> ''"
+    const val LINK_SOURCE_ADD = "INSERT OR IGNORE INTO link_source (link_id, source) VALUES (?, 'vault')"
+    const val LINK_USES = "SELECT link_id, COUNT(*) FROM entry_link GROUP BY link_id"
+    const val CONTEXT_USES = "SELECT context_id, COUNT(*) FROM entry WHERE context_id IS NOT NULL GROUP BY context_id"
     // END STORE_SQL
 }

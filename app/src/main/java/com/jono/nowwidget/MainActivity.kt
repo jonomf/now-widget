@@ -37,8 +37,10 @@ class MainActivity : Activity() {
     private lateinit var sizes: TextView
     private lateinit var updateStatus: TextView
     private lateinit var updaterButton: Button
+    private lateinit var obsidian: ObsidianSection
     private var periodDays = 1
     private val redraw: () -> Unit = { runOnUiThread { refresh() } }
+    private val redrawObsidian: () -> Unit = { runOnUiThread { obsidian.refresh() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -130,6 +132,10 @@ class MainActivity : Activity() {
         col.addView(button("Import from Daylio") { startActivity(Intent(this, ImportActivity::class.java)) })
         col.addView(note("Imports a Daylio backup (.daylio) or Daylio CSV. You choose where each Daylio activity goes first. Importing the same backup twice adds nothing."))
 
+        // --- Obsidian ---
+        obsidian = ObsidianSection(this)
+        col.addView(obsidian.view)
+
         // --- Home screen ---
         col.addView(heading("Your widgets"))
         col.addView(button("Add widget to home screen") { pinWidget() })
@@ -167,11 +173,14 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         WidgetRenderer.listeners.add(redraw)
+        ObsidianExport.listeners.add(redrawObsidian)
         WidgetRenderer.refresh(this)
+        ObsidianExport.onAppOpen(this)
     }
 
     override fun onPause() {
         WidgetRenderer.listeners.remove(redraw)
+        ObsidianExport.listeners.remove(redrawObsidian)
         super.onPause()
     }
 
@@ -191,6 +200,7 @@ class MainActivity : Activity() {
 
     private fun refresh() {
         val s = WidgetRenderer.snapshot(this)
+        obsidian.refresh()
         nowLine.text = s.act?.let { a ->
             a.emoji + " " + a.name + "  " + Fmt.dur(s.now - (s.cur?.start ?: s.now))
         } ?: "Nothing right now"
@@ -365,6 +375,7 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (obsidian.onResult(requestCode, resultCode, data)) return
         val uri = data?.data
         if (resultCode != RESULT_OK || uri == null) return
         val text = when (requestCode) {

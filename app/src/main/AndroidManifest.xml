@@ -91,6 +91,11 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+        <!-- Writes the Obsidian notes about a minute after the last change (plain JobScheduler). -->
+        <service
+            android:name=".ExportJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
         <!-- App-icon long-press "Claude session" shortcut (ClaudeLink.syncShortcut) opens this. -->
         <activity
             android:name=".ClaudeLinkActivity"

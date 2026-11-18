@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Runs the Store's own SQL (core/StoreSql.kt, read straight out of the Kotlin) against a v2
-database made by core/Schema.kt, to check the behaviours that could lose or duplicate data:
+"""Runs the Store's own SQL (core/StoreSql.kt, read straight out of the Kotlin) against a
+database made by core/Schema.kt (the current version), to check the behaviours that could lose or duplicate data:
 
 - deleting an entry detaches its notes and feelings instead of deleting them;
 - context is sticky: a new entry picks up the last non-idle entry's context, across idle gaps;
 - Daylio import dedupe: re-importing adds nothing, a second check-in in the same minute and mood
   with a different note is kept, and a feeling logged in Now that was exported and imported
   back isn't duplicated;
-- a failure part way through an import rolls everything back.
+- a failure part way through an import rolls everything back;
+- the Obsidian export's dirty days and content hashes, and which days a change reaches;
+- the vault index cache and how link uses are counted.
 
 The import loop mirrors Store.importDaylio step for step; the key rules mirror Daylio.key/altKey/
 decide (those are unit-tested in Kotlin too). Run: python3 tools/test_store_sql.py
@@ -35,7 +37,7 @@ def store_sql():
     for name, lit in re.findall(r'const val (\w+) = "((?:[^"\\$]|\\.)*)"', block):
         assert '\\' not in lit, name
         out[name] = lit
-    assert len(out) >= 10, out
+    assert len(out) >= 20, out
     return out
 
 
@@ -216,13 +218,91 @@ def test_import():
     check(snapshot(db) == before, 'duplicate key insert rolled back')
 
 
+# --- Obsidian export ---
+
+def test_export_days():
+    db = fresh_v2()
+    for d in ('2025-4-9', '2025-4-10'):
+        db.execute(SQL['MARK_DAY_DIRTY'], ('obsidian', d))
+    db.execute(SQL['MARK_DAY_DIRTY'], ('obsidian', '2025-4-9'))  # again: still one row
+    check(one(db, "SELECT COUNT(*) FROM export_day WHERE target = 'obsidian'") == 2, 'marking a day twice keeps one row')
+    check(sorted(r[0] for r in db.execute(SQL['DIRTY_DAYS'], ('obsidian',))) == ['2025-4-10', '2025-4-9'], 'both dirty')
+    db.execute(SQL['CLEAR_DAY_DIRTY'], ('obsidian', '2025-4-9'))
+    check([r[0] for r in db.execute(SQL['DIRTY_DAYS'], ('obsidian',))] == ['2025-4-10'], 'cleared one')
+    db.execute(SQL['MARK_DAY_DIRTY'], ('obsidian', '2025-4-9'))  # a change after the clear dirties it again
+    check(len(db.execute(SQL['DIRTY_DAYS'], ('obsidian',)).fetchall()) == 2, 'a change after the write marks it dirty again')
+
+    # Hashes: saved per target and day, replaced on a new write.
+    check(one(db, SQL['HASH_OF_DAY'], ('obsidian', '2025-4-9')) is None, 'no hash before the first write')
+    db.execute(SQL['SAVE_HASH'], ('obsidian', '2025-4-9', 'doc1', 'h1', 10))
+    db.execute(SQL['SAVE_HASH'], ('obsidian', '2025-4-9', 'doc1', 'h2', 20))
+    db.execute(SQL['SAVE_HASH'], ('calendar', '2025-4-9', 'evt', 'other', 30))
+    check(one(db, SQL['HASH_OF_DAY'], ('obsidian', '2025-4-9')) == 'h2', 'hash replaced')
+    check(one(db, SQL['HASH_OF_DAY'], ('calendar', '2025-4-9')) == 'other', 'targets are separate')
+
+    # A rename dirties only the days already written, for this target only.
+    db.execute("INSERT INTO export_day (target, day, dirty) VALUES ('obsidian', '2025-1-1', 0), ('calendar', '2025-4-9', 0)")
+    db.execute(SQL['SAVE_HASH'], ('obsidian', '2025-1-1', 'doc0', 'h0', 5))
+    db.execute(SQL['CLEAR_DAY_DIRTY'], ('obsidian', '2025-4-9'))
+    db.execute(SQL['CLEAR_DAY_DIRTY'], ('obsidian', '2025-4-10'))
+    db.execute(SQL['MARK_WRITTEN_DIRTY'], ('obsidian', 'obsidian'))
+    check(sorted(r[0] for r in db.execute(SQL['DIRTY_DAYS'], ('obsidian',))) == ['2025-1-1', '2025-4-9'],
+          'only days that have a written note become dirty')
+    check(one(db, "SELECT dirty FROM export_day WHERE target = 'calendar'") == 0, "another target's days are left alone")
+
+
+def test_change_reach():
+    db = fresh_v2()
+    for i, ms in enumerate((100, 200, 300)):
+        db.execute('INSERT INTO entry (id, activity_id, start_ms) VALUES (?, 1, ?)', (i + 1, ms))
+    check(one(db, SQL['PREV_ENTRY_START'], (200,)) == 100 and one(db, SQL['NEXT_ENTRY_START'], (200,)) == 300,
+          'the neighbours of the middle entry')
+    check(one(db, SQL['PREV_ENTRY_START'], (100,)) is None, 'nothing before the first')
+    check(one(db, SQL['NEXT_ENTRY_START'], (300,)) is None, 'nothing after the last: the range runs to now')
+    db.execute('INSERT INTO entry (id, activity_id, start_ms) VALUES (9, 1, 200)')  # same start time
+    check(one(db, SQL['PREV_ENTRY_START'], (200,)) == 100 and one(db, SQL['NEXT_ENTRY_START'], (200,)) == 300,
+          'an entry at the same start does not narrow the range')
+
+
+# --- Vault index ---
+
+def test_vault_index():
+    db = fresh_v2()
+    db.execute("INSERT INTO link (id, title, kind) VALUES (1, 'Sam', 'person'), (2, 'The Loft', 'place'), (3, 'Trip', 'context')")
+    db.execute("INSERT INTO entry (id, activity_id, start_ms, context_id) VALUES (1, 1, 10, 3), (2, 1, 20, 3), (3, 1, 30, NULL)")
+    db.execute("INSERT INTO entry_link (entry_id, link_id) VALUES (1, 1), (2, 1), (3, 2)")
+    check(dict(db.execute(SQL['LINK_USES']).fetchall()) == {1: 2, 2: 1}, 'uses as person or place')
+    check(dict(db.execute(SQL['CONTEXT_USES']).fetchall()) == {3: 2}, 'uses as context')
+
+    up = ('doc1', 'Sam.md', 5, 'Sam', 'person', 'Sammy\nS', 1)
+    db.execute(SQL['VAULT_UPSERT'], up)
+    db.execute(SQL['VAULT_UPSERT'], ('doc2', 'Tartine.md', 7, 'Tartine', 'place', '', 2))
+    db.execute(SQL['VAULT_UPSERT'], ('doc3', 'Loose.md', 8, 'Loose', 'other', 'Alias', None))
+    check(len(db.execute(SQL['VAULT_CACHE']).fetchall()) == 3, 'three cached notes')
+    db.execute(SQL['VAULT_UPSERT'], ('doc1', 'Sam.md', 6, 'Sam', 'person', 'Sammy\nS\nSamuel', 1))
+    check(one(db, "SELECT COUNT(*) FROM vault_note") == 3 and one(db, "SELECT modified FROM vault_note WHERE doc_id = 'doc1'") == 6,
+          'a changed note replaces its row')
+    check(dict(db.execute(SQL['VAULT_ALIASES']).fetchall()) == {1: 'Sammy\nS\nSamuel'},
+          'aliases come back by matched link, notes with no link or no alias left out')
+    db.execute(SQL['VAULT_DELETE'], ('doc2',))
+    check(one(db, "SELECT COUNT(*) FROM vault_note") == 2, 'a deleted note leaves the cache')
+    check(one(db, "SELECT COUNT(*) FROM link") == 3, 'and never deletes a link')
+    db.execute(SQL['LINK_SOURCE_ADD'], (2,))
+    db.execute(SQL['LINK_SOURCE_ADD'], (2,))
+    check(one(db, "SELECT COUNT(*) FROM link_source WHERE source = 'vault'") == 1, 'a link is marked as scan-made once')
+
+
 def main():
     test_delete_detaches()
     test_sticky_context()
     test_import()
+    test_export_days()
+    test_change_reach()
+    test_vault_index()
     print(f'{len(failures)} failures' if failures else
           f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; '
-          'import dedupe (re-import, same-minute notes, native feelings); rollback on failure')
+          'import dedupe (re-import, same-minute notes, native feelings); rollback on failure; '
+          'export dirty days and hashes; change reach; vault cache')
     sys.exit(1 if failures else 0)
 
 

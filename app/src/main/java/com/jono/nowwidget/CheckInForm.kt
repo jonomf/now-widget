@@ -135,7 +135,9 @@ class CheckInForm(
 
 /**
  * One choice from the links of [kind] (where, or context), shown as chips; tap again to clear.
- * "+" adds a new one by name. [touched] says whether you changed it.
+ * Only links you made, pinned or have used are chips, so a big vault doesn't flood the row; "+"
+ * finds any other one by typing (vault titles and aliases) or adds a new name.
+ * [touched] says whether you changed it.
  */
 class LinkRow(private val a: Activity, private val kind: String, title: String, selected: Long?) {
     val view: LinearLayout = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
@@ -153,7 +155,7 @@ class LinkRow(private val a: Activity, private val kind: String, title: String, 
 
     private fun draw() {
         wrap.removeAllViews()
-        Store.allLinks(a).filter { it.kind == kind && (!it.archived || it.id == selected) }.forEach { l ->
+        Store.allLinks(a).filter { it.id == selected || (it.kind == kind && it.chip && !it.archived) }.forEach { l ->
             wrap.addView(a.chip(l.label, l.id == selected) {
                 selected = if (selected == l.id) null else l.id
                 touched = true
@@ -161,8 +163,8 @@ class LinkRow(private val a: Activity, private val kind: String, title: String, 
             })
         }
         wrap.addView(a.chip("+", false) {
-            askName(a, "New " + kindName(kind)) { name ->
-                selected = Store.findOrAddLink(a, kind, name)
+            a.pickLink("Find or add a " + kindName(kind), pickKinds(kind), kind) { id ->
+                selected = id
                 touched = true
                 draw()
             }

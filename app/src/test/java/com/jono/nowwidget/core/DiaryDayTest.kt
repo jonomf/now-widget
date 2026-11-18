@@ -15,6 +15,13 @@ class DiaryDayTest {
         }.timeInMillis
 
     @Test
+    fun aDateStartsAtFour() {
+        assertEquals(t(2026, 11, 16, 4), DiaryDay.startOf(2026, 11, 16, la))
+        assertEquals(Triple(2026, 11, 16), DiaryDay.date(DiaryDay.startOf(2026, 11, 16, la), la))
+        assertEquals(t(2026, 3, 8, 4), DiaryDay.startOf(2026, 3, 8, la))
+    }
+
+    @Test
     fun beforeFourBelongsToThePreviousDay() {
         assertEquals(t(2026, 11, 15, 4), DiaryDay.start(t(2026, 11, 16, 3, 59), la))
         assertEquals(t(2026, 11, 16, 4), DiaryDay.start(t(2026, 11, 16, 4, 0), la))

@@ -9,20 +9,26 @@ import android.database.sqlite.SQLiteOpenHelper
 import com.jono.nowwidget.core.Act
 import com.jono.nowwidget.core.Daylio
 import com.jono.nowwidget.core.DaylioData
+import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.Entry
 import com.jono.nowwidget.core.FeelingTag
 import com.jono.nowwidget.core.IDLE
 import com.jono.nowwidget.core.Link
+import com.jono.nowwidget.core.LinkEntry
+import com.jono.nowwidget.core.LinkIndex
 import com.jono.nowwidget.core.LinkKind
 import com.jono.nowwidget.core.LogRules
 import com.jono.nowwidget.core.Moment
 import com.jono.nowwidget.core.MomentKind
 import com.jono.nowwidget.core.Mood
+import com.jono.nowwidget.core.ObsidianDay
 import com.jono.nowwidget.core.PALETTE
 import com.jono.nowwidget.core.Schema
 import com.jono.nowwidget.core.StoreSql
 import com.jono.nowwidget.core.Span
 import com.jono.nowwidget.core.TagTarget
+import com.jono.nowwidget.core.VaultNote
+import com.jono.nowwidget.core.VaultNotes
 import com.jono.nowwidget.core.levelFace
 import java.util.Calendar
 import java.util.Locale
@@ -69,6 +75,7 @@ private class Helper(ctx: Context) : SQLiteOpenHelper(ctx, "now.db", null, Schem
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) Schema.upgradeFrom1().forEach { db.execSQL(it) }
+        if (oldVersion < 3) Schema.upgradeFrom2().forEach { db.execSQL(it) }
     }
 }
 
@@ -81,8 +88,20 @@ data class ImportResult(
     val lastTs: Long?,
 )
 
+/** A vault note as the scan read it, ready to merge into the link table. */
+class VaultUpsert(val docId: String, val name: String, val modified: Long, val note: VaultNote)
+
+/** What the scan already knows about a vault file. */
+class VaultCacheRow(val docId: String, val name: String, val modified: Long, val kind: String, val linkId: Long?)
+
+data class VaultMerge(val created: Int, val matched: Int, val removed: Int)
+
 object Store {
     private const val DOUBLE_TAP_MS = 700L
+    private const val OBSIDIAN = "obsidian"
+
+    /** A change reaching further than this many diary days isn't marked past it; "Write all days" covers the rest. */
+    private const val MAX_DIRTY_DAYS = 62
     private const val DAY_MS = 86_400_000L
 
     private var helper: Helper? = null
@@ -145,6 +164,7 @@ object Store {
             db(ctx).insertOrThrow("activity", null, v)
         } else {
             db(ctx).update("activity", v, "id=?", args(id))
+            markWrittenDirty(ctx)
             id
         }
     }
@@ -172,12 +192,35 @@ object Store {
 
     // --- Links: people, places, contexts ---
 
-    /** Every link, including removed ones, in your order. */
+    /** Every link, including removed ones, in your order, with whether the vault has a note for it and how much it's used. */
     fun allLinks(ctx: Context): List<Link> {
+        val d = db(ctx)
+        val uses = HashMap<Long, Int>()
+        d.rawQuery(StoreSql.LINK_USES, null).use { c ->
+            while (c.moveToNext()) uses[c.getLong(0)] = c.getInt(1)
+        }
+        d.rawQuery(StoreSql.CONTEXT_USES, null).use { c ->
+            while (c.moveToNext()) uses[c.getLong(0)] = (uses[c.getLong(0)] ?: 0) + c.getInt(1)
+        }
+        val inVault = HashSet<Long>()
+        d.rawQuery("SELECT DISTINCT link_id FROM vault_note WHERE link_id IS NOT NULL", null).use { c ->
+            while (c.moveToNext()) inVault.add(c.getLong(0))
+        }
+        val fromVault = HashSet<Long>()
+        d.rawQuery("SELECT link_id FROM link_source", null).use { c ->
+            while (c.moveToNext()) fromVault.add(c.getLong(0))
+        }
         val out = ArrayList<Link>()
-        db(ctx).rawQuery("SELECT id, title, kind, emoji, pos, archived FROM link ORDER BY pos, id", null).use { c ->
+        d.rawQuery("SELECT id, title, kind, emoji, pos, archived, pinned FROM link ORDER BY pos, id", null).use { c ->
             while (c.moveToNext()) {
-                out.add(Link(c.getLong(0), c.getString(1), c.getString(2), c.getString(3), c.getInt(4), c.getInt(5) != 0))
+                val id = c.getLong(0)
+                out.add(
+                    Link(
+                        id, c.getString(1), c.getString(2), c.getString(3), c.getInt(4), c.getInt(5) != 0,
+                        pinned = c.getInt(6) != 0, inVault = id in inVault, fromVault = id in fromVault,
+                        uses = uses[id] ?: 0,
+                    )
+                )
             }
         }
         return out
@@ -185,19 +228,55 @@ object Store {
 
     fun links(ctx: Context, kind: String): List<Link> = allLinks(ctx).filter { it.kind == kind && !it.archived }
 
-    fun saveLink(ctx: Context, id: Long?, title: String, kind: String, emoji: String): Long {
+    /** [pinned] null leaves it as it is (a new link starts unpinned). */
+    fun saveLink(ctx: Context, id: Long?, title: String, kind: String, emoji: String, pinned: Boolean? = null): Long {
         val v = ContentValues().apply {
             put("title", title)
             put("kind", kind)
             put("emoji", emoji)
+            if (pinned != null) put("pinned", if (pinned) 1 else 0)
         }
         return if (id == null) {
             v.put("pos", nextPos(ctx, "link"))
             db(ctx).insertOrThrow("link", null, v)
         } else {
             db(ctx).update("link", v, "id=?", args(id))
+            markWrittenDirty(ctx)
             id
         }
+    }
+
+    /** A link from the picker or the add screen: brought back if removed, and pinned when [pin]. */
+    fun reviveLink(ctx: Context, id: Long, pin: Boolean = false) {
+        val v = ContentValues().apply {
+            put("archived", 0)
+            if (pin) put("pinned", 1)
+        }
+        db(ctx).update("link", v, "id=?", args(id))
+    }
+
+    /**
+     * Adds a link from the Add screen. A name that's an alias of a vault note means that note's link;
+     * a name you already have comes back if it was removed. Either way it's pinned, so it shows.
+     */
+    fun addLink(ctx: Context, title: String, kind: String, emoji: String): Long {
+        val t = title.trim()
+        val id = linkIndex(ctx).resolve(t, setOf(kind))?.id ?: findOrAddLink(ctx, kind, t)
+        val v = ContentValues().apply {
+            put("archived", 0)
+            put("pinned", 1)
+            if (emoji.isNotBlank()) put("emoji", emoji)
+        }
+        db(ctx).update("link", v, "id=?", args(id))
+        return id
+    }
+
+    /** Type-ahead over every link: titles, and the aliases their vault notes carry. */
+    fun linkIndex(ctx: Context): LinkIndex {
+        val aliases = vaultAliases(ctx)
+        return LinkIndex(allLinks(ctx).map {
+            LinkEntry(it.id, it.title, it.kind, aliases[it.id].orEmpty(), it.uses, it.archived, it.pinned)
+        })
     }
 
     /** The link of that kind and name (any case), brought back if it was removed, or a new one. */
@@ -238,6 +317,7 @@ object Store {
         }
         if (id != null) {
             db(ctx).update("mood", v, "id=?", args(id))
+            markWrittenDirty(ctx)
             return id
         }
         return tx(ctx) { d ->
@@ -282,6 +362,7 @@ object Store {
             db(ctx).insertOrThrow("feeling_tag", null, v)
         } else {
             db(ctx).update("feeling_tag", v, "id=?", args(id))
+            markWrittenDirty(ctx)
             id
         }
     }
@@ -323,12 +404,15 @@ object Store {
             args(e.start, e.start, e.id),
         ).use { c -> if (c.moveToFirst()) readEntry(c) else null }
 
-    private fun insert(ctx: Context, activityId: Long, start: Long, contextId: Long? = null): Long =
-        db(ctx).insertOrThrow("entry", null, ContentValues().apply {
+    private fun insert(ctx: Context, activityId: Long, start: Long, contextId: Long? = null): Long {
+        val id = db(ctx).insertOrThrow("entry", null, ContentValues().apply {
             put("activity_id", activityId)
             put("start_ms", start)
             if (contextId != null) put("context_id", contextId) else putNull("context_id")
         })
+        dirtyAround(ctx, start)
+        return id
+    }
 
     /** The one thing the buttons do. The rules are in [LogRules.tap]. */
     fun tap(ctx: Context, activityId: Long) {
@@ -384,8 +468,11 @@ object Store {
     }
 
     private fun setStart(ctx: Context, id: Long, start: Long) {
+        val old = startOf(ctx, id)
         val v = ContentValues().apply { put("start_ms", start) }
         db(ctx).update("entry", v, "id=?", args(id))
+        if (old != null) dirtyAround(ctx, old)
+        dirtyAround(ctx, start)
     }
 
     /**
@@ -412,6 +499,7 @@ object Store {
                 put("link_id", linkId)
             }, SQLiteDatabase.CONFLICT_IGNORE)
         }
+        dirtyAround(ctx, cur.start)
     }
 
     /** Sets where an entry happened: [placeId], or nowhere when null. */
@@ -428,11 +516,13 @@ object Store {
                 }, SQLiteDatabase.CONFLICT_IGNORE)
             }
         }
+        startOf(ctx, entryId)?.let { dirtyAround(ctx, it) }
     }
 
     fun setContext(ctx: Context, entryId: Long, contextId: Long?) {
         val v = ContentValues().apply { if (contextId != null) put("context_id", contextId) else putNull("context_id") }
         db(ctx).update("entry", v, "id=?", args(entryId))
+        startOf(ctx, entryId)?.let { dirtyAround(ctx, it) }
     }
 
     fun addEntry(ctx: Context, activityId: Long, start: Long, links: Set<Long>, contextId: Long?) {
@@ -444,6 +534,7 @@ object Store {
 
     fun updateEntry(ctx: Context, id: Long, activityId: Long, start: Long, links: Set<Long>, contextId: Long?) {
         tx(ctx) { d ->
+            val old = startOf(ctx, id)
             val v = ContentValues().apply {
                 put("activity_id", activityId)
                 put("start_ms", start)
@@ -451,6 +542,9 @@ object Store {
             }
             d.update("entry", v, "id=?", args(id))
             writeLinks(ctx, id, links)
+            // Both the old place in the day and the new one: a move across days marks both.
+            if (old != null) dirtyAround(ctx, old)
+            dirtyAround(ctx, start)
         }
     }
 
@@ -468,11 +562,18 @@ object Store {
     /** Its notes and feelings stay, as moments of their own at the same time. */
     fun deleteEntry(ctx: Context, id: Long) {
         tx(ctx) { d ->
+            val old = startOf(ctx, id)
             d.execSQL(StoreSql.DETACH_MOMENTS, arrayOf<Any>(id))
             d.execSQL(StoreSql.DELETE_ENTRY_LINKS, arrayOf<Any>(id))
             d.execSQL(StoreSql.DELETE_ENTRY, arrayOf<Any>(id))
+            if (old != null) dirtyAround(ctx, old)
         }
     }
+
+    private fun startOf(ctx: Context, entryId: Long): Long? =
+        db(ctx).rawQuery("SELECT start_ms FROM entry WHERE id = ?", args(entryId)).use { c ->
+            if (c.moveToFirst()) c.getLong(0) else null
+        }
 
     private fun linksFor(ctx: Context, ids: List<Long>): Map<Long, Set<Long>> {
         if (ids.isEmpty()) return emptyMap()
@@ -572,6 +673,7 @@ object Store {
         }
         val id = d.insertOrThrow("moment", null, v)
         writeTags(d, id, tags)
+        dirtyDay(ctx, ts)
         id
     }
 
@@ -586,6 +688,8 @@ object Store {
             d.update("moment", v, "id=?", args(m.id))
             d.delete("moment_tag", "moment_id=?", args(m.id))
             writeTags(d, m.id, tags)
+            dirtyDay(ctx, m.ts)
+            dirtyDay(ctx, ts)
         }
     }
 
@@ -600,6 +704,9 @@ object Store {
 
     fun deleteMoment(ctx: Context, id: Long) {
         tx(ctx) { d ->
+            d.rawQuery("SELECT ts FROM moment WHERE id = ?", args(id)).use { c ->
+                if (c.moveToFirst()) dirtyDay(ctx, c.getLong(0))
+            }
             d.delete("moment_tag", "moment_id=?", args(id))
             d.delete("moment_ref", "moment_id=?", args(id))
             d.delete("moment", "id=?", args(id))
@@ -652,6 +759,7 @@ object Store {
         var lastTs: Long? = null
         val cal = Calendar.getInstance()
         val insertMoment = d.compileStatement(StoreSql.INSERT_IMPORTED)
+        val importedDays = LinkedHashSet<Long>()
         data.entries.forEachIndexed { i, e ->
             if (i % 100 == 0) progress(i)
             val mood = data.mood(e.moodId)
@@ -693,10 +801,13 @@ object Store {
                 }
             }
             added++
+            importedDays.add(DiaryDay.start(ts))
             firstTs = minOf(firstTs ?: ts, ts)
             lastTs = maxOf(lastTs ?: ts, ts)
         }
         progress(data.entries.size)
+        importedDays.forEach { markDay(d, it) }
+        if (importedDays.isNotEmpty()) ObsidianExport.changed(ctx)
         ImportResult(added, there, skipped, firstTs, lastTs)
     }
 
@@ -715,6 +826,198 @@ object Store {
             "SELECT MIN(t), MAX(t) FROM (SELECT start_ms AS t FROM entry UNION ALL SELECT ts AS t FROM moment)",
             null,
         ).use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) to c.getLong(1) else null }
+
+    // --- Obsidian export: which days changed ---
+
+    private fun markDay(d: SQLiteDatabase, dayStart: Long) {
+        val (y, m, day) = DiaryDay.date(dayStart)
+        d.execSQL(StoreSql.MARK_DAY_DIRTY, arrayOf<Any>(OBSIDIAN, ObsidianDay.key(y, m, day)))
+    }
+
+    /** A change to one moment touches the diary day it sits in. */
+    private fun dirtyDay(ctx: Context, ts: Long) {
+        markDay(db(ctx), DiaryDay.start(ts))
+        ObsidianExport.changed(ctx)
+    }
+
+    /**
+     * Every change to an entry goes through here (insert, move, delete, links, context). The change
+     * at [ts] can reach every day from where the entry before it started to where the next one
+     * starts (or today), since an entry runs until the next begins.
+     */
+    private fun dirtyAround(ctx: Context, ts: Long) {
+        val d = db(ctx)
+        val prev = d.rawQuery(StoreSql.PREV_ENTRY_START, args(ts)).use { c -> if (c.moveToFirst()) c.longOrNull(0) else null }
+        val next = d.rawQuery(StoreSql.NEXT_ENTRY_START, args(ts)).use { c -> if (c.moveToFirst()) c.longOrNull(0) else null }
+        val last = DiaryDay.start(maxOf(next ?: System.currentTimeMillis(), ts))
+        var day = DiaryDay.start(minOf(prev ?: ts, ts))
+        var n = 0
+        while (day <= last && n < MAX_DIRTY_DAYS) {
+            markDay(d, day)
+            day = DiaryDay.add(day, 1)
+            n++
+        }
+        ObsidianExport.changed(ctx)
+    }
+
+    /** A rename or regroup can change every note already written. */
+    private fun markWrittenDirty(ctx: Context) {
+        db(ctx).execSQL(StoreSql.MARK_WRITTEN_DIRTY, arrayOf<Any>(OBSIDIAN, OBSIDIAN))
+        ObsidianExport.changed(ctx)
+    }
+
+    /** Marks today's diary day dirty (its running activity and totals move with the clock). */
+    fun markTodayDirty(ctx: Context) {
+        markDay(db(ctx), DiaryDay.start(System.currentTimeMillis()))
+    }
+
+    fun markDayDirty(ctx: Context, dayStart: Long) {
+        markDay(db(ctx), dayStart)
+    }
+
+    /** Day keys (`2025-4-9`) waiting to be written. */
+    fun dirtyDays(ctx: Context): List<String> {
+        val out = ArrayList<String>()
+        db(ctx).rawQuery(StoreSql.DIRTY_DAYS, args(OBSIDIAN)).use { c ->
+            while (c.moveToNext()) out.add(c.getString(0))
+        }
+        return out
+    }
+
+    fun clearDirty(ctx: Context, key: String) {
+        db(ctx).execSQL(StoreSql.CLEAR_DAY_DIRTY, arrayOf<Any>(OBSIDIAN, key))
+    }
+
+    fun markKeyDirty(ctx: Context, key: String) {
+        db(ctx).execSQL(StoreSql.MARK_DAY_DIRTY, arrayOf<Any>(OBSIDIAN, key))
+    }
+
+    fun exportHash(ctx: Context, key: String): String? =
+        db(ctx).rawQuery(StoreSql.HASH_OF_DAY, args(OBSIDIAN, key)).use { c -> if (c.moveToFirst()) c.getString(0) else null }
+
+    fun saveExportHash(ctx: Context, key: String, remoteId: String, hash: String) {
+        db(ctx).execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(OBSIDIAN, key, remoteId, hash, System.currentTimeMillis()))
+    }
+
+    /** Forget what was written (a different vault, or none): the next write is a full one. */
+    fun clearExportState(ctx: Context) {
+        db(ctx).execSQL("DELETE FROM export_state WHERE target = ?", arrayOf<Any>(OBSIDIAN))
+    }
+
+    /** Ids of the moments in [from, to) that came from a Daylio import. */
+    fun importedMomentIds(ctx: Context, from: Long, to: Long): Set<Long> {
+        val out = HashSet<Long>()
+        db(ctx).rawQuery(
+            "SELECT id FROM moment WHERE source_key IS NOT NULL AND ts >= ? AND ts < ?", args(from, to),
+        ).use { c ->
+            while (c.moveToNext()) out.add(c.getLong(0))
+        }
+        return out
+    }
+
+    /** The start of every diary day with something in it, oldest first. Imported check-ins count only when asked. */
+    fun activeDays(ctx: Context, includeImported: Boolean): List<Long> {
+        val days = java.util.TreeSet<Long>()
+        spans(ctx, 0L, System.currentTimeMillis()).forEach { s ->
+            var day = DiaryDay.start(s.from)
+            val last = DiaryDay.start(maxOf(s.from, s.to - 1))
+            var n = 0
+            while (day <= last && n < 400) {
+                days.add(day)
+                day = DiaryDay.add(day, 1)
+                n++
+            }
+        }
+        db(ctx).rawQuery("SELECT ts, source_key IS NOT NULL FROM moment", null).use { c ->
+            while (c.moveToNext()) {
+                if (includeImported || c.getInt(1) == 0) days.add(DiaryDay.start(c.getLong(0)))
+            }
+        }
+        return days.toList()
+    }
+
+    // --- The vault index ---
+
+    fun vaultCache(ctx: Context): Map<String, VaultCacheRow> {
+        val out = HashMap<String, VaultCacheRow>()
+        db(ctx).rawQuery(StoreSql.VAULT_CACHE, null).use { c ->
+            while (c.moveToNext()) {
+                out[c.getString(0)] = VaultCacheRow(c.getString(0), c.getString(1), c.getLong(2), c.getString(3), c.longOrNull(4))
+            }
+        }
+        return out
+    }
+
+    fun vaultCount(ctx: Context): Int =
+        db(ctx).rawQuery("SELECT COUNT(*) FROM vault_note", null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+
+    /** Aliases from the vault notes, by the link each note matched. */
+    fun vaultAliases(ctx: Context): Map<Long, List<String>> {
+        val out = HashMap<Long, MutableList<String>>()
+        db(ctx).rawQuery(StoreSql.VAULT_ALIASES, null).use { c ->
+            while (c.moveToNext()) out.getOrPut(c.getLong(0)) { ArrayList() }.addAll(VaultNotes.unpackAliases(c.getString(1)))
+        }
+        return out
+    }
+
+    /** Forget the cache (and with it which links have notes). The links themselves stay. */
+    fun clearVaultCache(ctx: Context) {
+        db(ctx).execSQL("DELETE FROM vault_note")
+    }
+
+    /**
+     * Merges what a scan found into the link table, in one transaction. A note whose title matches
+     * a link you already have (any case) is matched to it and the link is left exactly as it is;
+     * otherwise a new link is made and marked as made by the vault. Links are never archived or
+     * deleted here, whatever happened to the note.
+     */
+    fun applyVaultScan(ctx: Context, upserts: List<VaultUpsert>, removed: Collection<String>): VaultMerge = tx(ctx) { d ->
+        val cache = vaultCache(ctx)
+        val links = allLinks(ctx)
+        val byTitle = HashMap<String, MutableList<LinkEntry>>()
+        links.forEach { l ->
+            byTitle.getOrPut(l.title.trim().lowercase(Locale.ROOT)) { ArrayList() }
+                .add(LinkEntry(l.id, l.title, l.kind, emptyList(), l.uses, l.archived, l.pinned))
+        }
+        val scanMade = links.filter { it.fromVault }.associateBy { it.id }
+        var pos = nextPos(ctx, "link")
+        var created = 0
+        var matched = 0
+        upserts.forEach { u ->
+            val n = u.note
+            val key = n.title.trim().lowercase(Locale.ROOT)
+            val found = LinkIndex.matchForNote(byTitle[key].orEmpty(), n.title, n.kind)
+            val linkId: Long
+            if (found == null) {
+                linkId = d.insertOrThrow("link", null, ContentValues().apply {
+                    put("title", n.title)
+                    put("kind", n.kind)
+                    put("emoji", "")
+                    put("pos", pos++)
+                    put("pinned", 0)
+                    put("archived", 0)
+                })
+                d.execSQL(StoreSql.LINK_SOURCE_ADD, arrayOf<Any>(linkId))
+                byTitle.getOrPut(key) { ArrayList() }.add(LinkEntry(linkId, n.title, n.kind, emptyList(), 0, false, false))
+                created++
+            } else {
+                linkId = found.id
+                matched++
+                // A scan-made link follows its note's tag while you haven't changed the kind yourself.
+                val old = cache[u.docId]
+                val made = scanMade[linkId]
+                if (old != null && made != null && old.kind != n.kind && made.kind == old.kind) {
+                    d.update("link", ContentValues().apply { put("kind", n.kind) }, "id=?", args(linkId))
+                }
+            }
+            d.execSQL(
+                StoreSql.VAULT_UPSERT,
+                arrayOf<Any>(u.docId, u.name, u.modified, n.title, n.kind, VaultNotes.packAliases(n.aliases), linkId),
+            )
+        }
+        removed.forEach { d.execSQL(StoreSql.VAULT_DELETE, arrayOf<Any>(it)) }
+        VaultMerge(created, matched, removed.size)
+    }
 
     // --- Smart button order ---
 
@@ -771,4 +1074,34 @@ object Prefs {
 
     fun lockButtons(ctx: Context): Int = p(ctx).getInt("lock_buttons", 5)
     fun setLockButtons(ctx: Context, v: Int) = p(ctx).edit().putInt("lock_buttons", v).apply()
+
+    // --- Obsidian vault ---
+
+    /** The folder you picked (a document tree URI), the vault's root folder inside it, and its name. */
+    fun vaultTree(ctx: Context): String? = p(ctx).getString("vault_tree", null)
+    fun vaultRoot(ctx: Context): String? = p(ctx).getString("vault_root", null)
+    fun vaultName(ctx: Context): String = p(ctx).getString("vault_name", "") ?: ""
+
+    fun setVault(ctx: Context, tree: String?, root: String?, name: String) = p(ctx).edit()
+        .putString("vault_tree", tree).putString("vault_root", root).putString("vault_name", name).apply()
+
+    fun vaultLastExport(ctx: Context): Long = p(ctx).getLong("vault_last_export", 0L)
+    fun setVaultLastExport(ctx: Context, v: Long) = p(ctx).edit().putLong("vault_last_export", v).apply()
+
+    /** What went wrong the last time, or blank. */
+    fun vaultError(ctx: Context): String = p(ctx).getString("vault_error", "") ?: ""
+    fun setVaultError(ctx: Context, v: String) = p(ctx).edit().putString("vault_error", v).apply()
+
+    /** What went wrong the last time the vault was scanned, or blank. */
+    fun vaultScanError(ctx: Context): String = p(ctx).getString("vault_scan_error", "") ?: ""
+    fun setVaultScanError(ctx: Context, v: String) = p(ctx).edit().putString("vault_scan_error", v).apply()
+
+    fun vaultLastScan(ctx: Context): Long = p(ctx).getLong("vault_last_scan", 0L)
+    fun vaultScanText(ctx: Context): String = p(ctx).getString("vault_scan_text", "") ?: ""
+    fun setVaultScan(ctx: Context, at: Long, text: String) = p(ctx).edit()
+        .putLong("vault_last_scan", at).putString("vault_scan_text", text).apply()
+
+    /** Days made only of Daylio-imported check-ins are written too (off by default). */
+    fun exportImported(ctx: Context): Boolean = p(ctx).getBoolean("export_imported", false)
+    fun setExportImported(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("export_imported", on).apply()
 }

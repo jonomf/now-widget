@@ -33,6 +33,14 @@ object DiaryDay {
         return Triple(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1, c.get(Calendar.DAY_OF_MONTH))
     }
 
+    /** The 4:00am that starts the diary day with this date ([month] is 1–12). */
+    fun startOf(year: Int, month: Int, day: Int, tz: TimeZone = TimeZone.getDefault()): Long {
+        val c = Calendar.getInstance(tz)
+        c.clear()
+        c.set(year, month - 1, day, START_HOUR, 0, 0)
+        return c.timeInMillis
+    }
+
     /**
      * A clock time picked for the diary day starting at [dayStart]: times before 4:00am fall on
      * the next calendar date, since they're the end of that diary day.

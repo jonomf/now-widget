@@ -16,6 +16,7 @@ import android.widget.TextView
 import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.Mood
 import com.jono.nowwidget.core.Span
+import com.jono.nowwidget.core.formatDuration
 import com.jono.nowwidget.core.levelFace
 import java.util.Date
 
@@ -23,15 +24,7 @@ object Fmt {
     /** Start of today's diary day (4am to 4am). */
     fun today(): Long = DiaryDay.start(System.currentTimeMillis())
 
-    fun dur(ms: Long): String {
-        val m = ms / 60_000L
-        return when {
-            m < 1L -> "<1m"
-            m < 60L -> "${m}m"
-            m % 60L == 0L -> "${m / 60L}h"
-            else -> "${m / 60L}h ${m % 60L}m"
-        }
-    }
+    fun dur(ms: Long): String = formatDuration(ms)
 
     fun time(ctx: Context, ms: Long): String = DateFormat.getTimeFormat(ctx).format(Date(ms))
 

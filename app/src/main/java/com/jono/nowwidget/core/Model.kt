@@ -24,7 +24,17 @@ data class Link(
     val emoji: String,
     val pos: Int,
     val archived: Boolean,
+    /** Kept on the widget chips and in the check-in box whatever else is true. */
+    val pinned: Boolean = false,
+    /** A note in the vault has this title (or this link was matched to one). */
+    val inVault: Boolean = false,
+    /** The vault scan made this link; you didn't. Those stay off the chips until pinned or used. */
+    val fromVault: Boolean = false,
+    /** How many entries use it, as a person, a place or a context. */
+    val uses: Int = 0,
 ) {
+    /** Hand-made links are always chips; ones the vault scan made only once you pin or use them. */
+    val chip: Boolean get() = !fromVault || pinned || uses > 0
     val badge: String get() = emoji.ifBlank { title.take(1).uppercase() }
     val label: String get() = if (emoji.isBlank()) title else "$emoji $title"
 }
