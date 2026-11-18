@@ -39,13 +39,41 @@ class CheckInForm(
         alpha = 0.7f
     }
     private val tagWrap = WrapLayout(a)
+    private val faceRow = WrapLayout(a)
 
     init {
+        buildFaces()
+        val faceHolder = if (pinFaces) faceView else view
+        faceHolder.addView(faceRow)
+        faceHolder.addView(moodName)
+        markFaces()
+
+        view.addView(a.label("Feeling"))
+        view.addView(tagWrap)
+        drawTags()
+
+        extras.forEach { view.addView(it) }
+
+        view.addView(a.label("Note"))
+        text = EditText(a).apply {
+            hint = "Type or tap the mic"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            minLines = 2
+            maxLines = 8
+            setText(initial?.text ?: "")
+        }
+        view.addView(text)
+    }
+
+    /** (Re)draws the faces; an archived mood only gets one while it's the chosen mood. */
+    private fun buildFaces() {
+        faces.clear()
+        faceRow.removeAllViews()
         val moods = Store.allMoods(a).filter { !it.archived || it.id == moodId }.sortedWith(compareBy({ it.level }, { it.pos }))
         // When two moods share a level (an imported custom mood, say), their faces can look the
         // same, so every face gets its name under it.
         val named = moods.groupBy { it.level }.any { it.value.size > 1 }
-        val faceRow = WrapLayout(a)
         moods.forEach { m ->
             val cell = LinearLayout(a).apply {
                 orientation = LinearLayout.VERTICAL
@@ -77,27 +105,20 @@ class CheckInForm(
             faces.add(m.id to cell)
             faceRow.addView(cell)
         }
-        val faceHolder = if (pinFaces) faceView else view
-        faceHolder.addView(faceRow)
-        faceHolder.addView(moodName)
+    }
+
+    /** Loads [m] (or a blank form for null) in place of what's there. */
+    fun load(m: Moment?) = set(m?.moodId, m?.tags ?: emptyList(), m?.text ?: "")
+
+    fun set(mood: Long?, newTags: Collection<Long>, newText: String) {
+        moodId = mood
+        tags.clear()
+        tags.addAll(newTags)
+        text.setText(newText)
+        text.setSelection(text.text.length)
+        buildFaces()
         markFaces()
-
-        view.addView(a.label("Feeling"))
-        view.addView(tagWrap)
         drawTags()
-
-        extras.forEach { view.addView(it) }
-
-        view.addView(a.label("Note"))
-        text = EditText(a).apply {
-            hint = "Type or tap the mic"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            minLines = 2
-            maxLines = 8
-            setText(initial?.text ?: "")
-        }
-        view.addView(text)
     }
 
     /** True when there's anything to save as a moment. */
@@ -139,11 +160,11 @@ class CheckInForm(
  * finds any other one by typing (vault titles and aliases) or adds a new name.
  * [touched] says whether you changed it.
  */
-class LinkRow(private val a: Activity, private val kind: String, title: String, selected: Long?) {
+class LinkRow(private val a: Activity, private val kind: String, title: String, selected: Long?, touched: Boolean = false) {
     val view: LinearLayout = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
     var selected: Long? = selected
         private set
-    var touched = false
+    var touched = touched
         private set
     private val wrap = WrapLayout(a)
 
