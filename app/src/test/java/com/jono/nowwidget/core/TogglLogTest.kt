@@ -171,10 +171,11 @@ class TogglLogTest {
     @Test
     fun readsTimeEntries() {
         val text = """[{"id":3649112345,"workspace_id":77,"start":"2025-04-09T09:15:00+00:00","stop":"2025-04-09T10:40:00+00:00","duration":5100,"tags":["now","Sam"],"description":"x"},
-            {"id":5,"workspace_id":77,"start":"2025-04-09T11:00:00Z","duration":-1,"tags":null},{"workspace_id":1}]"""
+            {"id":5,"workspace_id":77,"start":"2025-04-09T11:00:00Z","duration":-1,"tags":null,"server_deleted_at":"2025-04-09T12:00:00Z"},{"workspace_id":1}]"""
         val seen = TogglJson.seen(text)
         assertEquals(2, seen.size)
-        assertEquals(TogglSeen(3649112345L, 77L, t(9, 15) / 1000, 5100L, listOf("now", "Sam")), seen[0])
+        assertEquals(TogglSeen(3649112345L, 77L, t(9, 15) / 1000, 5100L, listOf("now", "Sam"), "x", false), seen[0])
+        assertTrue(seen[1].deleted)
         assertEquals(emptyList<String>(), seen[1].tags)
         assertEquals(t(11) / 1000, seen[1].startSec)
         assertTrue(TogglJson.seen("{}").isEmpty())
@@ -183,14 +184,16 @@ class TogglLogTest {
 
     @Test
     fun pendingRecordsRoundTrip() {
-        val p = TogglRecord("2025-4-9/e7", 77L, 0L, "abc:def", 1700000000L, 5100L, false)
+        val p = TogglRecord("2025-4-9/e7", 77L, 0L, "abc", 1700000000L, 5100L, false, 1699999000000L, "d3adbeef")
         val f = TogglRecordCodec.hashField(p)
-        assertEquals("pending:1700000000:5100:n:abc:def", f)
+        assertEquals("pending:1699999000000:1700000000:5100:n:d3adbeef:abc", f)
         assertEquals(p, TogglRecordCodec.read(p.key, 77L, 0L, f))
         val done = TogglRecord("2025-4-9/e7", 77L, 99L, "abc")
         assertEquals("abc", TogglRecordCodec.hashField(done))
         assertEquals(done, TogglRecordCodec.read(done.key, 77L, 99L, "abc"))
-        // A pending record from garbage still reads as a record.
-        assertTrue(TogglRecordCodec.read("k", 1L, 0L, "pending:x").pending)
+        // A pending record from garbage still reads as a record, which matches nothing.
+        val bad = TogglRecordCodec.read("k", 1L, 0L, "pending:x")
+        assertTrue(bad.pending)
+        assertEquals("", bad.pendingDesc)
     }
 }

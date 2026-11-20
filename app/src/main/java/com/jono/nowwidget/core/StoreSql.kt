@@ -85,6 +85,10 @@ object StoreSql {
      * remote_id `workspaceId:entryId`, where entry 0 is a pending record (a POST whose answer may be lost).
      * The entries recorded as sent are the ones that aren't pending (target).
      */
+    const val DELETE_TARGET = "DELETE FROM export_state WHERE target = ?"
+
+    /** A different Toggl account: keep the old records out of the way, untouched (new target, old target). */
+    const val RETARGET = "UPDATE OR REPLACE export_state SET target = ? WHERE target = ?"
     const val TOGGL_SENT_COUNT = "SELECT COUNT(*) FROM export_state WHERE target = ? AND remote_id NOT LIKE '%:0'"
 
     /** Which of your calendars each activity group maps to (its area); '' is ungrouped, a blank calendar is none. */

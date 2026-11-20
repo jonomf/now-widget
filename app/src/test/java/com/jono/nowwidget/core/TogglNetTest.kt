@@ -62,7 +62,12 @@ class TogglNetTest {
     @Test
     fun backoffDoublesToAnHour() {
         val net = TogglStop(StopKind.NETWORK, "offline")
-        assertEquals(listOf(1, 2, 4, 8, 16, 32, 60, 60), (1..8).map { (TogglBackoff.delayMs(net, it)!! / 60_000L).toInt() })
+        // No connection waits a fixed two minutes, not a doubling one.
+        assertEquals(List(8) { 2 }, (1..8).map { (TogglBackoff.delayMs(net, it)!! / 60_000L).toInt() })
+        assertEquals(120_000L, TogglBackoff.delayMs(TogglUnknown("lost"), 5))
+        // 429 and 5xx double up to an hour.
+        val srv = TogglStop(StopKind.SERVER, "oops")
+        assertEquals(listOf(1, 2, 4, 8, 16, 32, 60, 60), (1..8).map { (TogglBackoff.delayMs(srv, it)!! / 60_000L).toInt() })
         // Toggl's own wait counts when it is longer.
         assertEquals(120_000L, TogglBackoff.delayMs(TogglStop(StopKind.RATE, "x", 120_000L), 1))
         // A full quota waits for its reset, not the back-off.
@@ -139,13 +144,24 @@ class TogglNetTest {
     }
 
     @Test
-    fun oldRequestsAndStrangeClocksDontCount() {
+    fun oldRequestsAgeOutButAClockGoingBackwardsKeepsTheCount() {
         val b = RequestBudget()
         val now = 100_000_000L
         b.record(now - 4_000_000L)
-        // A time far in the future (the clock was changed) is dropped, not trusted for an hour.
-        b.record(now + 9_000_000L)
-        assertEquals(0, b.used(now))
+        b.record(now - 1_000L)
+        assertEquals(1, b.used(now))
+        // The clock jumps back a day: what was counted still counts, and nothing waits more than an hour.
+        repeat(RequestBudget.LIMIT - 1) { b.record(now + it) }
+        val back = now - 86_400_000L
+        assertEquals(RequestBudget.LIMIT, b.used(back))
+        assertEquals(RequestBudget.WINDOW_MS + 1_000L, b.waitMs(TogglBucket.WORKSPACE, back))
+    }
+
+    @Test
+    fun aForbiddenEntryIsRefusedNotABadToken() {
+        val r = TogglHttp.classify(TogglReply(403, "no"), entryLevel = true) as TogglHttp.Outcome.Rejected
+        assertEquals(403, r.code)
+        assertEquals(StopKind.AUTH, stop(TogglReply(403, "no")).kind)
     }
 
     @Test

@@ -8,6 +8,7 @@ import android.content.ComponentName
 import android.content.Context
 import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.ExportProtocol
+import com.jono.nowwidget.core.CalendarDay
 import com.jono.nowwidget.core.RequestBudget
 import com.jono.nowwidget.core.StopKind
 import com.jono.nowwidget.core.TogglBackoff
@@ -45,6 +46,9 @@ object TogglExport {
     private const val SCHEDULE_GAP_MS = 5_000L
     private const val MAX_PASSES = 20
 
+    /** A run stops cleanly after this long; what's left stays dirty for the next one. */
+    private const val MAX_RUN_MS = 8L * 60_000L
+
     private val lock = Any()
     private val writing = AtomicBoolean(false)
     @Volatile private var lastScheduled = 0L
@@ -81,12 +85,16 @@ object TogglExport {
         TogglJob.schedule(ctx, maxOf(DEBOUNCE_MS, Prefs.togglNextAt(ctx) - now))
     }
 
+    /** Sets the next job if something is waiting. Never from inside a running job: its id would be rescheduled under it (the job's end does this). */
     fun scheduleIfPending(ctx: Context) {
         try {
+            if (TogglJob.active) return
             if (Prefs.togglFatal(ctx).isNotBlank()) return
             // A back-off or a full quota leaves the next attempt time set; a run that went through clears it.
             val retry = Prefs.togglNextAt(ctx) > 0L
-            if (Prefs.togglRemoving(ctx) || (configured(ctx) && (retry || pendingNow(ctx)))) schedule(ctx.applicationContext)
+            val more = moreWaiting
+            moreWaiting = false
+            if (Prefs.togglRemoving(ctx) || (configured(ctx) && (retry || more || pendingNow(ctx)))) schedule(ctx.applicationContext)
         } catch (e: Exception) {
             // The days stay dirty; the next app open sends them.
         }
@@ -130,12 +138,14 @@ object TogglExport {
         Prefs.setTogglError(app, "")
         Prefs.setTogglNextAt(app, 0L)
         Prefs.setTogglFailures(app, 0)
+        Prefs.clearTogglProjectRefusals(app)
         Store.markDaysDirty(app, Store.TOGGL, daysToSend(app))
         run(app, manual = true)
     }
 
     /** "Send now": tries again right away, even after a back-off or a refused token; the hourly budget still holds. */
     fun sendNow(ctx: Context) = task(ctx, "Sending to Toggl…") { app ->
+        Prefs.clearTogglProjectRefusals(app)
         if (Prefs.togglRemoving(app) || configured(app)) run(app, manual = true)
     }
 
@@ -244,36 +254,52 @@ object TogglExport {
         val warnings = ArrayList<String>()
         val errors = ArrayList<String>()
         val stats = TogglStats()
-        val client = TogglClient(ctx, token, warnings)
+        val client = TogglClient.make(ctx, token, warnings)
         val ledger = StoreTogglLedger(ctx)
         val lk = ObsidianExport.Lookups(ctx)
         val notes = Prefs.togglNotes(ctx)
         val checkIns = Prefs.togglCheckIns(ctx)
         val from = fromMs(ctx)
-        val now = System.currentTimeMillis()
+        val began = System.currentTimeMillis()
+        val now = began
+        val todayStart = DiaryDay.start(now)
+        val todayKey = dayKey(todayStart)
+        val yesterdayKey = dayKey(DiaryDay.add(todayStart, -1))
         var stop: TogglStop? = null
+        var tooLong = false
         val attempted = HashMap<String, Int>()
         writing.set(true)
         try {
             var pass = 0
             outer@ while (pass++ < MAX_PASSES) {
                 val dirty = Store.dirtyDays(ctx, Store.TOGGL)
-                val keys = TogglSync.oldestFirst(ExportProtocol.pending(dirty, attempted))
+                // Re-sorted every pass: today, then yesterday, then the backlog oldest first.
+                val keys = TogglSync.priorityOrder(ExportProtocol.pending(dirty, attempted), todayKey, yesterdayKey)
                 if (keys.isEmpty()) break
                 lastAttempted = HashMap(attempted)
                 for (key in keys) {
+                    if (System.currentTimeMillis() - began > MAX_RUN_MS) {
+                        tooLong = true
+                        break@outer
+                    }
                     attempted[key] = dirty.getValue(key)
                     val ymd = ObsidianExport.parseKey(key)
                     val dayStart = ymd?.let { DiaryDay.startOf(it.first, it.second, it.third) }
-                    // Not a day, in the future, or before "Send past days": nothing to send, so it's done.
-                    if (ymd == null || dayStart == null || dayStart > now || (from > 0L && dayStart < from)) {
+                    if (ymd == null || dayStart == null || dayStart > now) {
+                        Store.clearDirtyIf(ctx, key, dirty.getValue(key), Store.TOGGL)
+                        continue
+                    }
+                    // Before "Send past days": nothing new is sent, but entries already sent keep being kept up to date.
+                    val before = from > 0L && dayStart < from
+                    if (before && ledger.records(key).isEmpty()) {
                         Store.clearDirtyIf(ctx, key, dirty.getValue(key), Store.TOGGL)
                         continue
                     }
                     try {
                         val data = ObsidianExport.dayData(ctx, lk, dayStart, now)
                         val desired = TogglDay.entries(data, ws, notes, checkIns)
-                        TogglSync.writeDay(client, ledger, key, dayStart, DiaryDay.add(dayStart, 1), desired, stats, errors, warnings)
+                        TogglSync.writeDay(client, ledger, key, dayStart, DiaryDay.add(dayStart, 1), desired, stats, errors, warnings, System.currentTimeMillis(), allowNew = !before)
+                        noteUnresolved(ctx, key, stats)
                     } catch (e: TogglStop) {
                         stop = e
                         break@outer
@@ -305,8 +331,26 @@ object TogglExport {
         }
         Prefs.setTogglError(ctx, problem)
         notifyListeners()
-        // Inside the job, the job's end sets the next one: scheduling the same job id while it runs would stop it.
-        if (!TogglJob.active && Prefs.togglFatal(ctx).isBlank() && (stop != null || errors.isNotEmpty() || pendingNow(ctx))) schedule(ctx.applicationContext)
+        // Inside the job, the job's end sets the next one (see scheduleIfPending).
+        if (!TogglJob.active && Prefs.togglFatal(ctx).isBlank() &&
+            (stop != null || errors.isNotEmpty() || tooLong || stats.again || pendingNow(ctx))
+        ) schedule(ctx.applicationContext)
+        if (tooLong || stats.again) moreWaiting = true
+    }
+
+    /** True after a run that left work on purpose (it ran long, or adopted an entry to act on next time): the job's end schedules the next run. */
+    @Volatile private var moreWaiting = false
+
+    private fun dayKey(dayStart: Long): String {
+        val (y, m, d) = DiaryDay.date(dayStart)
+        return com.jono.nowwidget.core.ObsidianDay.key(y, m, d)
+    }
+
+    /** The unresolved entries of this day as the run found them (and none of its older ones that are settled now). */
+    private fun noteUnresolved(ctx: Context, day: String, stats: TogglStats) {
+        val mine = stats.unresolved.filter { CalendarDay.dayOf(it) == day }.toSet()
+        val others = Prefs.togglUnresolved(ctx).filter { CalendarDay.dayOf(it) != day }.toSet()
+        if (mine.isNotEmpty() || others.size != Prefs.togglUnresolved(ctx).size) Prefs.setTogglUnresolved(ctx, others + mine)
     }
 
     // --- Removing what was sent ---
@@ -337,8 +381,9 @@ object TogglExport {
             notifyListeners()
             return
         }
-        val client = TogglClient(ctx, token)
-        val r = TogglSync.removeAll(client, Store.allTogglRecords(ctx)) { Store.dropTogglRecord(ctx, it.key) }
+        val client = TogglClient.make(ctx, token)
+        val began = System.currentTimeMillis()
+        val r = TogglSync.removeAll(client, Store.allTogglRecords(ctx), { Store.dropTogglRecord(ctx, it.key) }, { System.currentTimeMillis() - began < MAX_RUN_MS })
         val total = Prefs.togglRemoved(ctx) + r.removed + r.gone
         Prefs.setTogglRemoved(ctx, total)
         val stop = r.stop
@@ -346,6 +391,10 @@ object TogglExport {
         if (stop != null) {
             Prefs.setTogglError(ctx, afterStop(ctx, stop, now))
             if (!TogglJob.active && Prefs.togglFatal(ctx).isBlank()) schedule(ctx.applicationContext)
+        } else if (r.paused) {
+            // Ran long: the rest goes in the next run.
+            moreWaiting = true
+            if (!TogglJob.active) schedule(ctx.applicationContext)
         } else {
             Prefs.setTogglRemoving(ctx, false)
             Prefs.setTogglFailures(ctx, 0)
@@ -362,25 +411,32 @@ object TogglExport {
 
     // --- Setup calls (a token check and the workspace list) ---
 
-    /** Reads the workspaces with [token] on a background thread; [onDone] hears the list or a plain-words problem (from any thread). */
-    fun fetchWorkspaces(ctx: Context, token: String, onDone: (List<Pair<Long, String>>?, String) -> Unit) {
+    /** The account a token belongs to: its /me id and workspaces. */
+    class Account(val userId: Long, val workspaces: List<Pair<Long, String>>)
+
+    /**
+     * Checks [token] with Toggl (the account id and the workspaces: two requests against the /me
+     * quota) on a background thread; [onDone] hears the account or a plain-words problem (from any
+     * thread). It doesn't wait for a running export: the request count is shared safely.
+     */
+    fun fetchAccount(ctx: Context, token: String, onDone: (Account?, String) -> Unit) {
         val app = ctx.applicationContext
         Thread {
-            var list: List<Pair<Long, String>>? = null
+            var account: Account? = null
             var problem = ""
-            synchronized(lock) {
-                try {
-                    list = TogglClient(app, token).workspaces()
-                } catch (e: TogglStop) {
-                    problem = when (e.kind) {
-                        StopKind.AUTH -> "Toggl didn't accept that token. Copy it again from Profile settings."
-                        else -> e.message ?: e.kind.name
-                    }
-                } catch (e: Exception) {
-                    problem = describe(e)
+            try {
+                val client = TogglClient.make(app, token)
+                val id = client.me()
+                account = Account(id, client.workspaces())
+            } catch (e: TogglStop) {
+                problem = when (e.kind) {
+                    StopKind.AUTH -> "Toggl didn't accept that token. Copy it again from Profile settings."
+                    else -> e.message ?: e.kind.name
                 }
+            } catch (e: Exception) {
+                problem = describe(e)
             }
-            onDone(list, problem)
+            onDone(account, problem)
         }.start()
     }
 
@@ -416,6 +472,13 @@ object TogglExport {
         if (problem.isNotBlank() && problem != fatal) lines.add("Last problem: $problem")
         val info = Prefs.togglInfo(ctx)
         if (info.isNotBlank()) lines.add(info)
+        val unresolved = Prefs.togglUnresolved(ctx)
+        if (unresolved.isNotEmpty()) {
+            lines.add(
+                "${unresolved.size} entr" + (if (unresolved.size == 1) "y" else "ies") + " may be duplicated in Toggl; check " +
+                    TogglSync.oldestFirst(unresolved.map { CalendarDay.dayOf(it) }.toSet()).take(3).joinToString(", ") + ". They aren't changed or deleted by the app."
+            )
+        }
         val released = Store.togglReleasedCount(ctx)
         if (released > 0) {
             lines.add("$released entr" + (if (released == 1) "y was" else "ies were") + " deleted in Toggl and " + (if (released == 1) "isn't" else "aren't") + " sent again.")

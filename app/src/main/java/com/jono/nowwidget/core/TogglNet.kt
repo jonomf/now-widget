@@ -11,7 +11,7 @@ enum class StopKind {
     QUOTA,
     /** Too fast (HTTP 429). */
     RATE,
-    /** No connection, or it dropped. */
+    /** No connection, no DNS, a timeout before any answer, or a write whose answer was lost. */
     NETWORK,
     /** Toggl had a problem (5xx). */
     SERVER,
@@ -62,9 +62,10 @@ object TogglHttp {
     /**
      * What a reply means. [projectCreate]: the call that makes a project, where 402 and 403 mean
      * "not on your plan" (the entries then go without a project) rather than a bad token.
-     * [quotaBlocked] is true when the reply says the hourly limit is hit (402 with its signs).
+     * [entryLevel]: an update or delete of one entry, where 403 means "not this one" (a refusal for
+     * that request) and not a bad token.
      */
-    fun classify(r: TogglReply, projectCreate: Boolean = false): Outcome {
+    fun classify(r: TogglReply, projectCreate: Boolean = false, entryLevel: Boolean = false): Outcome {
         val c = r.code
         if (c in 200..299) return Outcome.Ok
         val why = message(r.body)
@@ -77,6 +78,7 @@ object TogglHttp {
                 if (quota) Outcome.Stop(TogglStop(StopKind.QUOTA, "Toggl's hourly request limit is used up", (resets ?: DEFAULT_QUOTA_WAIT_S) * 1000L + 2_000L))
                 else Outcome.Stop(TogglStop(StopKind.PLAN, "Toggl says this needs a paid plan" + suffix(why)))
             }
+            c == 403 && entryLevel -> Outcome.Rejected(403, "Toggl wouldn't allow it (403)" + suffix(why))
             c == 403 && projectCreate -> Outcome.Stop(TogglStop(StopKind.PLAN, "Toggl won't let this plan make projects" + suffix(why)))
             c == 403 -> Outcome.Stop(TogglStop(StopKind.AUTH, "Toggl refused access (403)" + suffix(why)))
             c == 429 -> Outcome.Stop(TogglStop(StopKind.RATE, "Toggl says too many requests too fast", (r.resetsInSec ?: 60L) * 1000L))
@@ -141,7 +143,8 @@ class RequestBudget(
             "|r:" + remaining.entries.joinToString(",") { it.key + "=" + it.value.first + "@" + it.value.second }
 
     private fun prune(now: Long) {
-        times.removeAll { it <= now - WINDOW_MS || it > now + 60_000L }
+        // A clock that went backwards leaves later times in place: the count stays, it isn't cleared.
+        times.removeAll { it <= now - WINDOW_MS }
         blocked.entries.removeAll { it.value <= now }
         remaining.entries.removeAll { it.value.second <= now }
     }
@@ -156,8 +159,9 @@ class RequestBudget(
     fun waitMs(bucket: String, now: Long): Long {
         prune(now)
         var w = 0L
-        blocked[bucket]?.let { w = maxOf(w, it - now) }
-        if (times.size >= LIMIT) w = maxOf(w, times.min() + WINDOW_MS - now + 1_000L)
+        // Never more than an hour (and a second), whatever the clock did.
+        blocked[bucket]?.let { w = maxOf(w, minOf(it - now, WINDOW_MS + 1_000L)) }
+        if (times.size >= LIMIT) w = maxOf(w, minOf(times.min() + WINDOW_MS - now, WINDOW_MS) + 1_000L)
         return w
     }
 
@@ -204,6 +208,9 @@ object TogglBackoff {
     const val FIRST_MS = 60_000L
     const val MAX_MS = 3_600_000L
 
+    /** No connection (or a lost answer): try again after this, the job also waits for a network. */
+    const val OFFLINE_MS = 120_000L
+
     /** 1, 2, 4... minutes, up to an hour, for the [failures]th failure in a row (1 or more). */
     fun exponential(failures: Int): Long {
         val n = (failures - 1).coerceIn(0, 12)
@@ -212,12 +219,14 @@ object TogglBackoff {
 
     /**
      * How long to wait after a stop; null when waiting won't help ([TogglStop.fatal]). A full quota
-     * waits for the reset Toggl named (at least a minute); the rest back off exponentially, but never
-     * less than Toggl asked for. [failures] counts stops in a row that weren't about the quota.
+     * waits for the reset Toggl named (at least a minute); no connection waits a fixed two minutes
+     * (the job needs a network anyway); 429 and 5xx back off exponentially, but never less than
+     * Toggl asked for. [failures] counts stops in a row that weren't about the quota.
      */
     fun delayMs(stop: TogglStop, failures: Int): Long? = when {
         stop.fatal -> null
         stop.kind == StopKind.QUOTA -> maxOf(stop.waitMs, FIRST_MS)
+        stop.kind == StopKind.NETWORK -> maxOf(stop.waitMs, OFFLINE_MS)
         else -> maxOf(stop.waitMs, exponential(maxOf(1, failures)))
     }
 }

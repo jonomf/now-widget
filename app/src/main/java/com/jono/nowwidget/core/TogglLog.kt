@@ -32,9 +32,10 @@ data class TogglWant(
 
 /**
  * What the app remembers about an entry it sent. [entryId] 0 is a pending record: saved just before
- * a POST, so a POST whose answer never arrived can be recognised later by its start and duration
- * ([pendingStart], [pendingDur], and whether it was sent with tags, [pendingTags]); [hash] is then
- * the hash of what was being sent.
+ * a POST, so a POST whose answer never arrived can be recognised later: by when it was saved
+ * ([pendingSavedAt], ms: only entries made after that qualify), its start and duration, a hash of
+ * the description sent ([pendingDesc]), and whether it was sent with tags ([pendingTags]). [hash]
+ * is then the hash of everything that was being sent.
  */
 data class TogglRecord(
     val key: String,
@@ -44,36 +45,51 @@ data class TogglRecord(
     val pendingStart: Long = 0L,
     val pendingDur: Long = 0L,
     val pendingTags: Boolean = true,
+    val pendingSavedAt: Long = 0L,
+    val pendingDesc: String = "",
 ) {
     val pending: Boolean get() = entryId == 0L
 }
 
-/** How a record's hash column holds a pending record's details: `pending:<start>:<dur>:<t|n>:<hash>`. */
+/** How a record's hash column holds a pending record's details: `pending:<saved>:<start>:<dur>:<t|n>:<desc hash>:<hash>`. */
 object TogglRecordCodec {
     private const val PENDING = "pending:"
 
     fun hashField(r: TogglRecord): String =
-        if (!r.pending) r.hash else PENDING + r.pendingStart + ":" + r.pendingDur + ":" + (if (r.pendingTags) "t" else "n") + ":" + r.hash
+        if (!r.pending) r.hash
+        else PENDING + r.pendingSavedAt + ":" + r.pendingStart + ":" + r.pendingDur + ":" + (if (r.pendingTags) "t" else "n") + ":" + r.pendingDesc + ":" + r.hash
 
     fun read(key: String, workspaceId: Long, entryId: Long, field: String): TogglRecord {
         if (entryId == 0L && field.startsWith(PENDING)) {
-            val p = field.removePrefix(PENDING).split(':', limit = 4)
-            val start = p.getOrNull(0)?.toLongOrNull()
-            val dur = p.getOrNull(1)?.toLongOrNull()
-            if (start != null && dur != null && p.size == 4) {
-                return TogglRecord(key, workspaceId, 0L, p[3], start, dur, p[2] != "n")
+            val p = field.removePrefix(PENDING).split(':', limit = 6)
+            val saved = p.getOrNull(0)?.toLongOrNull()
+            val start = p.getOrNull(1)?.toLongOrNull()
+            val dur = p.getOrNull(2)?.toLongOrNull()
+            if (saved != null && start != null && dur != null && p.size == 6) {
+                return TogglRecord(key, workspaceId, 0L, p[5], start, dur, p[3] != "n", saved, p[4])
             }
         }
         return TogglRecord(key, workspaceId, entryId, field)
     }
 }
 
-/** An entry as Toggl lists it (`GET /me/time_entries`). */
-data class TogglSeen(val id: Long, val workspaceId: Long, val startSec: Long, val durationSec: Long, val tags: List<String>)
+/** An entry as Toggl lists it (`GET /me/time_entries`). [deleted]: it has a `server_deleted_at`. */
+data class TogglSeen(
+    val id: Long,
+    val workspaceId: Long,
+    val startSec: Long,
+    val durationSec: Long,
+    val tags: List<String>,
+    val description: String = "",
+    val deleted: Boolean = false,
+)
 
 object TogglDay {
     /** Shorter finished runs aren't sent. */
     const val MIN_MS = 60_000L
+
+    /** What a pending record keeps of the description it sent, to recognise the entry later. */
+    fun descHash(description: String): String = ObsidianDay.hash(description)
 
     /** On every entry this app makes, so they can be told apart (and found again after a lost answer). */
     const val TAG_NOW = "now"
@@ -207,7 +223,7 @@ object TogglJson {
             val start = parseIso(m["start"] as? String) ?: return@mapNotNull null
             val dur = (m["duration"] as? Number)?.toLong() ?: return@mapNotNull null
             val tags = (m["tags"] as? List<*>)?.mapNotNull { it as? String } ?: emptyList()
-            TogglSeen(id, ws, start, dur, tags)
+            TogglSeen(id, ws, start, dur, tags, (m["description"] as? String) ?: "", m["server_deleted_at"] != null)
         }
     }
 }

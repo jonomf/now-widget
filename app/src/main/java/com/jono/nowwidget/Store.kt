@@ -126,6 +126,8 @@ object Store {
     /** Toggl: records of entries sent (export_state), and of entries he deleted in Toggl (never made again). */
     const val TOGGL = "toggl"
     private const val TOGGL_RELEASED = "toggl-released"
+    private const val TOGGL_OLD = "toggl-old"
+    private const val TOGGL_OLD_RELEASED = "toggl-old-released"
 
     /** Every export target a change marks dirty: one place marks them all. */
     private val TARGETS = listOf(OBSIDIAN, CALENDAR, TOGGL)
@@ -1108,6 +1110,24 @@ object Store {
             if (c.moveToFirst()) c.getInt(0) else 0
         }
 
+    /** A different Toggl account, and the old entries are given up on: every Toggl record goes, with no calls to Toggl. */
+    fun forgetTogglRecords(ctx: Context) {
+        tx(ctx) { d ->
+            d.execSQL(StoreSql.DELETE_TARGET, arrayOf<Any>(TOGGL))
+            d.execSQL(StoreSql.DELETE_TARGET, arrayOf<Any>(TOGGL_RELEASED))
+        }
+        Prefs.setTogglUnresolved(ctx, emptySet())
+    }
+
+    /** A different Toggl account, and the old entries stay in the old account: their records move aside, never used again by the new token. */
+    fun shelveTogglRecords(ctx: Context) {
+        tx(ctx) { d ->
+            d.execSQL(StoreSql.RETARGET, arrayOf<Any>(TOGGL_OLD, TOGGL))
+            d.execSQL(StoreSql.RETARGET, arrayOf<Any>(TOGGL_OLD_RELEASED, TOGGL_RELEASED))
+        }
+        Prefs.setTogglUnresolved(ctx, emptySet())
+    }
+
     fun togglReleasedCount(ctx: Context): Int =
         db(ctx).rawQuery("SELECT COUNT(*) FROM export_state WHERE target = ?", args(TOGGL_RELEASED)).use { c ->
             if (c.moveToFirst()) c.getInt(0) else 0
@@ -1471,8 +1491,19 @@ object Prefs {
     // --- Toggl ---
 
     /** The API token, in this app's private storage (the app has allowBackup off). Never shown whole, never logged. */
-    fun togglToken(ctx: Context): String? = p(ctx).getString("toggl_token", null)?.takeIf { it.isNotBlank() }
-    fun setTogglToken(ctx: Context, v: String?) = p(ctx).edit().putString("toggl_token", v).apply()
+    fun togglToken(ctx: Context): String? = secret(ctx).getString("toggl_token", null)?.takeIf { it.isNotBlank() }
+    fun setTogglToken(ctx: Context, v: String?) = secret(ctx).edit().putString("toggl_token", v).commit().let { }
+
+    /** The token has a preferences file of its own, which data_extraction_rules.xml keeps out of device transfers. */
+    private fun secret(ctx: Context) = ctx.getSharedPreferences("toggl_secret", Context.MODE_PRIVATE)
+
+    /** Whose Toggl account the token is (the /me id; 0 when not known), to tell a new account from the same one. */
+    fun togglUserId(ctx: Context): Long = p(ctx).getLong("toggl_user", 0L)
+    fun setTogglUserId(ctx: Context, v: Long) = p(ctx).edit().putLong("toggl_user", v).apply()
+
+    /** Keys of sent entries that couldn't be settled (several matches, or the lookup was refused), for the status line. */
+    fun togglUnresolved(ctx: Context): Set<String> = p(ctx).getStringSet("toggl_unresolved", emptySet())?.toSet() ?: emptySet()
+    fun setTogglUnresolved(ctx: Context, v: Set<String>) = p(ctx).edit().putStringSet("toggl_unresolved", v).apply()
 
     /** The workspace entries go to (0: none chosen), and its name. */
     fun togglWorkspace(ctx: Context): Long = p(ctx).getLong("toggl_ws", 0L)
@@ -1518,7 +1549,7 @@ object Prefs {
 
     /** The request count and Toggl's quota words, as [com.jono.nowwidget.core.RequestBudget] writes them. */
     fun togglBudget(ctx: Context): String? = p(ctx).getString("toggl_budget", null)
-    fun setTogglBudget(ctx: Context, v: String) = p(ctx).edit().putString("toggl_budget", v).apply()
+    fun setTogglBudget(ctx: Context, v: String) = p(ctx).edit().putString("toggl_budget", v).commit().let { }
 
     /** "Remove sent entries" is under way (it carries on within the quota), and how many it has removed so far. */
     fun togglRemoving(ctx: Context): Boolean = p(ctx).getBoolean("toggl_removing", false)
@@ -1547,8 +1578,27 @@ object Prefs {
 
     /** The workspace's projects were listed once, so a missing name is created, not searched for again. */
     fun togglProjectsListed(ctx: Context, ws: Long): Boolean = ws.toString() in (p(ctx).getStringSet("toggl_listed", emptySet()) ?: emptySet())
-    fun setTogglProjectsListed(ctx: Context, ws: Long) =
-        p(ctx).edit().putStringSet("toggl_listed", (p(ctx).getStringSet("toggl_listed", emptySet()) ?: emptySet()) + ws.toString()).apply()
+    fun setTogglProjectsListed(ctx: Context, ws: Long, on: Boolean) {
+        val now = p(ctx).getStringSet("toggl_listed", emptySet()) ?: emptySet()
+        p(ctx).edit().putStringSet("toggl_listed", if (on) now + ws.toString() else now - ws.toString()).apply()
+    }
+
+    fun forgetTogglProject(ctx: Context, ws: Long, key: String) {
+        val keep = (p(ctx).getString("toggl_projects", "") ?: "").lines().filter { l ->
+            val f = l.split('\t')
+            f.size == 3 && !(f[0] == ws.toString() && f[2] == key)
+        }
+        p(ctx).edit().putString("toggl_projects", keep.joinToString("\n")).apply()
+    }
+
+    /** Project names Toggl refused, as `workspace<TAB>lowercase name`: not tried again until "Send now". */
+    fun togglRefusedProject(ctx: Context, ws: Long, key: String): Boolean = "$ws\t$key" in (p(ctx).getStringSet("toggl_refused", emptySet()) ?: emptySet())
+    fun addTogglRefusedProject(ctx: Context, ws: Long, key: String) =
+        p(ctx).edit().putStringSet("toggl_refused", (p(ctx).getStringSet("toggl_refused", emptySet()) ?: emptySet()) + "$ws\t$key").apply()
+
+    /** "Send now" gives refused project names, and a plan that wouldn't make projects, another try. */
+    fun clearTogglProjectRefusals(ctx: Context) =
+        p(ctx).edit().remove("toggl_refused").remove("toggl_noproj").apply()
 
     /** Toggl wouldn't make projects on this workspace's plan: entries go without one. */
     fun togglNoProjects(ctx: Context, ws: Long): Boolean = ws.toString() in (p(ctx).getStringSet("toggl_noproj", emptySet()) ?: emptySet())

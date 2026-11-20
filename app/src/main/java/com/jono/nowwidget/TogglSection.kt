@@ -190,28 +190,74 @@ class TogglSection(private val a: Activity) {
         message.text = "Checking the token with Toggl…"
         checking = true
         refresh()
-        TogglExport.fetchWorkspaces(a, token) { list, problem ->
+        TogglExport.fetchAccount(a, token) { account, problem ->
             a.runOnUiThread {
                 checking = false
-                if (list == null) {
+                if (account == null) {
                     message.text = problem
                     refresh()
                     return@runOnUiThread
                 }
-                // Only a token Toggl accepted is kept.
-                Prefs.setTogglToken(a, token)
-                tokenInput.setText("")
-                Prefs.setTogglFatal(a, "")
-                Prefs.setTogglError(a, "")
-                message.text = ""
-                when {
-                    list.isEmpty() -> message.text = "The token works, but Toggl lists no workspaces for it."
-                    list.size == 1 -> setWorkspace(list[0].first, list[0].second)
-                    else -> pickWorkspace(list)
+                val old = Prefs.togglUserId(a)
+                if (old != 0L && old != account.userId) {
+                    askAboutOldAccount(token, account)
+                } else {
+                    keepToken(token, account)
                 }
                 refresh()
             }
         }
+    }
+
+    /** A token for a different Toggl account: what happens to the entries sent to the old one is asked, not assumed. */
+    private fun askAboutOldAccount(token: String, account: TogglExport.Account) {
+        val n = TogglExport.sentCount(a)
+        if (n == 0) {
+            Store.forgetTogglRecords(a)
+            switchAccount(token, account)
+            return
+        }
+        AlertDialog.Builder(a)
+            .setTitle("Forget the $n entr" + (if (n == 1) "y" else "ies") + " sent to the old account?")
+            .setMessage(
+                "This token is for a different Toggl account. The entries already sent stay in the old account either way; the app makes no calls to delete them. " +
+                    "Forget them, or keep them aside (never touched with the new token)? Sending is turned off until you choose a workspace and turn it on."
+            )
+            .setPositiveButton("Forget them") { _, _ ->
+                Store.forgetTogglRecords(a)
+                switchAccount(token, account)
+                refresh()
+            }
+            .setNegativeButton("Keep them aside") { _, _ ->
+                Store.shelveTogglRecords(a)
+                switchAccount(token, account)
+                refresh()
+            }
+            .setNeutralButton("Cancel", null)
+            .show()
+    }
+
+    private fun switchAccount(token: String, account: TogglExport.Account) {
+        TogglExport.stop(a)
+        Prefs.setTogglWorkspace(a, 0L, "")
+        keepToken(token, account)
+    }
+
+    /** Only a token Toggl accepted is kept, with the account it belongs to. */
+    private fun keepToken(token: String, account: TogglExport.Account) {
+        Prefs.setTogglToken(a, token)
+        Prefs.setTogglUserId(a, account.userId)
+        tokenInput.setText("")
+        Prefs.setTogglFatal(a, "")
+        Prefs.setTogglError(a, "")
+        message.text = ""
+        val list = account.workspaces
+        when {
+            list.isEmpty() -> message.text = "The token works, but Toggl lists no workspaces for it."
+            list.size == 1 -> setWorkspace(list[0].first, list[0].second)
+            else -> pickWorkspace(list)
+        }
+        refresh()
     }
 
     private fun chooseWorkspace() {
@@ -219,11 +265,11 @@ class TogglSection(private val a: Activity) {
         message.text = "Asking Toggl for your workspaces…"
         checking = true
         refresh()
-        TogglExport.fetchWorkspaces(a, token) { list, problem ->
+        TogglExport.fetchAccount(a, token) { account, problem ->
             a.runOnUiThread {
                 checking = false
-                message.text = if (list == null) problem else ""
-                if (list != null && list.isNotEmpty()) pickWorkspace(list)
+                message.text = if (account == null) problem else ""
+                if (account != null && account.workspaces.isNotEmpty()) pickWorkspace(account.workspaces)
                 refresh()
             }
         }

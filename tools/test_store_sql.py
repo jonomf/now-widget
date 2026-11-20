@@ -341,6 +341,19 @@ def test_toggl_records():
     check(dirty == {'2026-11-1': 3, '2026-11-10': 1}, f'days with entries dirty, a dirty one bumped once: {dirty}')
     check(one(db, "SELECT dirty FROM export_day WHERE target = 'calendar'") == 0, 'calendar days untouched')
 
+    # A different account: records go for good, or move aside under other targets, and a second shelving replaces the first.
+    db.execute(save, ('toggl-released', '2026-11-1/e1', '77:5', 'x', 1))
+    db.execute(SQL['RETARGET'], ('toggl-old', 'toggl'))
+    db.execute(SQL['RETARGET'], ('toggl-old-released', 'toggl-released'))
+    check(one(db, "SELECT COUNT(*) FROM export_state WHERE target = 'toggl'") == 0, 'nothing left under toggl')
+    check(one(db, "SELECT COUNT(*) FROM export_state WHERE target = 'toggl-old'") == 3, 'the records are kept, aside')
+    check(one(db, "SELECT COUNT(*) FROM export_state WHERE target = 'calendar'") == 1, 'calendar records untouched')
+    db.execute(save, ('toggl', '2026-11-1/e5', '99:7', 'h', 2))
+    db.execute(SQL['RETARGET'], ('toggl-old', 'toggl'))
+    check(one(db, SQL['HASH_OF_DAY'], ('toggl-old', '2026-11-1/e5')) == 'h', 'a second shelving replaces a key rather than failing')
+    db.execute(SQL['DELETE_TARGET'], ('toggl-old',))
+    check(one(db, "SELECT COUNT(*) FROM export_state WHERE target LIKE 'toggl%'") == 1, 'forgetting removes only that target (the released one stays here)')
+
     # The central mark covers a third target the same way.
     for t in ('obsidian', 'calendar', 'toggl'):
         db.execute(SQL['MARK_DAY_DIRTY'], (t, '2026-12-1'))
