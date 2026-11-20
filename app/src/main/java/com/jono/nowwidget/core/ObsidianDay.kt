@@ -149,7 +149,7 @@ object ObsidianDay {
         return parts.joinToString(" ") to context
     }
 
-    private fun feelingPart(m: DayMoment): String {
+    fun feelingPart(m: DayMoment): String {
         val mood = if (m.mood.isBlank()) "" else {
             val face = m.moodEmoji.ifBlank { levelFace(m.moodLevel ?: 3) }
             "$face ${m.mood.trim()}"

@@ -514,7 +514,7 @@ class CalendarSection(private val a: Activity) {
                 "Android will ask to let Now see and change your calendar events. " +
                     "Now uses that to write your log as events in a calendar you pick, and to read your planned events to compare and to suggest a button. " +
                     "It only ever changes or deletes events it made itself, in the log calendars you pick. " +
-                    "Log events include your notes and moods, so anyone you share the log calendar with can see them. Nothing goes anywhere else: the app has no internet access, Google's own sync uploads the events."
+                    "Log events include your notes and moods, so anyone you share the log calendar with can see them. Nothing goes anywhere else: the calendar export itself uses no internet, Google's own sync uploads the events."
             )
             .setNegativeButton("Not now", null)
             .setPositiveButton("Continue") { _, _ ->

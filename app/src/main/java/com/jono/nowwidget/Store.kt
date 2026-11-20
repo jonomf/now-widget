@@ -37,6 +37,8 @@ import com.jono.nowwidget.core.Schema
 import com.jono.nowwidget.core.StoreSql
 import com.jono.nowwidget.core.Span
 import com.jono.nowwidget.core.TagTarget
+import com.jono.nowwidget.core.TogglRecord
+import com.jono.nowwidget.core.TogglRecordCodec
 import com.jono.nowwidget.core.VaultNote
 import com.jono.nowwidget.core.VaultNotes
 import com.jono.nowwidget.core.levelFace
@@ -121,8 +123,12 @@ object Store {
     /** Records of events edited outside Now: never touched or replaced again (key stays taken). */
     private const val CALENDAR_RELEASED = "calendar-released"
 
+    /** Toggl: records of entries sent (export_state), and of entries he deleted in Toggl (never made again). */
+    const val TOGGL = "toggl"
+    private const val TOGGL_RELEASED = "toggl-released"
+
     /** Every export target a change marks dirty: one place marks them all. */
-    private val TARGETS = listOf(OBSIDIAN, CALENDAR)
+    private val TARGETS = listOf(OBSIDIAN, CALENDAR, TOGGL)
 
     /** A change reaching further than this many diary days isn't marked past it; "Write all days" covers the rest. */
     private const val MAX_DIRTY_DAYS = 62
@@ -858,7 +864,7 @@ object Store {
 
     // --- Obsidian export: which days changed ---
 
-    /** Marks the day dirty for every export target (Obsidian and Calendar). */
+    /** Marks the day dirty for every export target (Obsidian, Calendar and Toggl). */
     private fun markDay(d: SQLiteDatabase, dayStart: Long) {
         val (y, m, day) = DiaryDay.date(dayStart)
         TARGETS.forEach { d.execSQL(StoreSql.MARK_DAY_DIRTY, arrayOf<Any>(it, ObsidianDay.key(y, m, day))) }
@@ -868,6 +874,7 @@ object Store {
     private fun exportersChanged(ctx: Context) {
         ObsidianExport.changed(ctx)
         CalendarExport.changed(ctx)
+        TogglExport.changed(ctx)
     }
 
     /** A change to one moment touches the diary day it sits in. */
@@ -898,8 +905,19 @@ object Store {
             d.execSQL(StoreSql.MARK_WRITTEN_ADD, arrayOf<Any>(OBSIDIAN, OBSIDIAN))
             d.execSQL(StoreSql.CAL_MARK_WRITTEN_BUMP, arrayOf<Any>(CALENDAR, CALENDAR))
             d.execSQL(StoreSql.CAL_MARK_WRITTEN_ADD, arrayOf<Any>(CALENDAR, CALENDAR))
+            d.execSQL(StoreSql.CAL_MARK_WRITTEN_BUMP, arrayOf<Any>(TOGGL, TOGGL))
+            d.execSQL(StoreSql.CAL_MARK_WRITTEN_ADD, arrayOf<Any>(TOGGL, TOGGL))
         }
         exportersChanged(ctx)
+    }
+
+    /** The Toggl description options changed: every day with sent entries is looked at again (only entries whose text changed are updated). */
+    fun markTogglWrittenDirty(ctx: Context) {
+        tx(ctx) { d ->
+            d.execSQL(StoreSql.CAL_MARK_WRITTEN_BUMP, arrayOf<Any>(TOGGL, TOGGL))
+            d.execSQL(StoreSql.CAL_MARK_WRITTEN_ADD, arrayOf<Any>(TOGGL, TOGGL))
+        }
+        TogglExport.changed(ctx)
     }
 
     /** A calendar setting changed (log calendar, areas, colors): every day with events is redone. */
@@ -1040,6 +1058,60 @@ object Store {
     fun dropTestRecord(ctx: Context, key: String) {
         db(ctx).execSQL(StoreSql.CAL_RECORD_DELETE, arrayOf<Any>(CALENDAR_TEST, key))
     }
+
+    // --- Toggl export records (export_state, target 'toggl'; remote_id `workspaceId:entryId`, entry 0 while pending) ---
+
+    private fun readTogglRecords(c: Cursor): List<TogglRecord> {
+        val out = ArrayList<TogglRecord>()
+        while (c.moveToNext()) {
+            val (ws, id) = parseRemote(c.getString(1)) ?: continue
+            out.add(TogglRecordCodec.read(c.getString(0), ws, id, c.getString(2)))
+        }
+        return out
+    }
+
+    /** The app's records of the Toggl entries it sent for one diary day (`2025-4-9`), pending ones included. */
+    fun togglRecords(ctx: Context, dayKey: String): List<TogglRecord> =
+        db(ctx).rawQuery(StoreSql.CAL_RECORDS_OF_DAY, arrayOf(TOGGL) + dayRange(dayKey)).use { readTogglRecords(it) }
+
+    /** Keys of one day's entries that were deleted in Toggl. */
+    fun togglReleasedKeys(ctx: Context, dayKey: String): Set<String> =
+        db(ctx).rawQuery(StoreSql.CAL_RECORDS_OF_DAY, arrayOf(TOGGL_RELEASED) + dayRange(dayKey)).use { c ->
+            val out = HashSet<String>()
+            while (c.moveToNext()) out.add(c.getString(0))
+            out
+        }
+
+    /** Every record, pending ones included. */
+    fun allTogglRecords(ctx: Context): List<TogglRecord> =
+        db(ctx).rawQuery(StoreSql.CAL_RECORDS_ALL, args(TOGGL)).use { readTogglRecords(it) }
+
+    fun saveTogglRecord(ctx: Context, r: TogglRecord) {
+        db(ctx).execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(TOGGL, r.key, "${r.workspaceId}:${r.entryId}", TogglRecordCodec.hashField(r), System.currentTimeMillis()))
+    }
+
+    fun dropTogglRecord(ctx: Context, key: String) {
+        db(ctx).execSQL(StoreSql.CAL_RECORD_DELETE, arrayOf<Any>(TOGGL, key))
+    }
+
+    /** Deleted in Toggl: the record moves to the released list, which keeps its key from being sent again. */
+    fun releaseTogglRecord(ctx: Context, r: TogglRecord, why: String) {
+        tx(ctx) { d ->
+            d.execSQL(StoreSql.SAVE_HASH, arrayOf<Any>(TOGGL_RELEASED, r.key, "${r.workspaceId}:${r.entryId}", why, System.currentTimeMillis()))
+            d.execSQL(StoreSql.CAL_RECORD_DELETE, arrayOf<Any>(TOGGL, r.key))
+        }
+    }
+
+    /** Entries recorded as sent (a pending record, entry 0, isn't one). */
+    fun togglSentCount(ctx: Context): Int =
+        db(ctx).rawQuery(StoreSql.TOGGL_SENT_COUNT, args(TOGGL)).use { c ->
+            if (c.moveToFirst()) c.getInt(0) else 0
+        }
+
+    fun togglReleasedCount(ctx: Context): Int =
+        db(ctx).rawQuery("SELECT COUNT(*) FROM export_state WHERE target = ?", args(TOGGL_RELEASED)).use { c ->
+            if (c.moveToFirst()) c.getInt(0) else 0
+        }
 
     // --- Areas: which of your calendars each group maps to ---
 
@@ -1395,4 +1467,91 @@ object Prefs {
     /** Calendar access was asked for at least once (a denial after that needs App info). */
     fun calAsked(ctx: Context): Boolean = p(ctx).getBoolean("cal_asked", false)
     fun setCalAsked(ctx: Context) = p(ctx).edit().putBoolean("cal_asked", true).apply()
+
+    // --- Toggl ---
+
+    /** The API token, in this app's private storage (the app has allowBackup off). Never shown whole, never logged. */
+    fun togglToken(ctx: Context): String? = p(ctx).getString("toggl_token", null)?.takeIf { it.isNotBlank() }
+    fun setTogglToken(ctx: Context, v: String?) = p(ctx).edit().putString("toggl_token", v).apply()
+
+    /** The workspace entries go to (0: none chosen), and its name. */
+    fun togglWorkspace(ctx: Context): Long = p(ctx).getLong("toggl_ws", 0L)
+    fun togglWorkspaceName(ctx: Context): String = p(ctx).getString("toggl_ws_name", "") ?: ""
+    fun setTogglWorkspace(ctx: Context, id: Long, name: String) = p(ctx).edit().putLong("toggl_ws", id).putString("toggl_ws_name", name).apply()
+
+    /** Sending to Toggl: off until you turn it on. */
+    fun togglOn(ctx: Context): Boolean = p(ctx).getBoolean("toggl_on", false)
+    fun setTogglOn(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("toggl_on", on).apply()
+
+    /** Moods and feelings in descriptions: off by default. Notes: on by default. */
+    fun togglCheckIns(ctx: Context): Boolean = p(ctx).getBoolean("toggl_checkins", false)
+    fun setTogglCheckIns(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("toggl_checkins", on).apply()
+    fun togglNotes(ctx: Context): Boolean = p(ctx).getBoolean("toggl_notes", true)
+    fun setTogglNotes(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("toggl_notes", on).apply()
+
+    /** The first diary day to send (its start, ms); 0 sends everything; -1 is not chosen yet (the day it is turned on). */
+    fun togglFrom(ctx: Context): Long = p(ctx).getLong("toggl_from", -1L)
+    fun setTogglFrom(ctx: Context, v: Long) = p(ctx).edit().putLong("toggl_from", v).apply()
+
+    fun togglLastSync(ctx: Context): Long = p(ctx).getLong("toggl_last", 0L)
+    fun setTogglLastSync(ctx: Context, v: Long) = p(ctx).edit().putLong("toggl_last", v).apply()
+
+    /** What went wrong the last time, or blank. */
+    fun togglError(ctx: Context): String = p(ctx).getString("toggl_error", "") ?: ""
+    fun setTogglError(ctx: Context, v: String) = p(ctx).edit().putString("toggl_error", v).apply()
+
+    /** Notices from the last run (tags Toggl refused, a plan without projects), or blank. */
+    fun togglInfo(ctx: Context): String = p(ctx).getString("toggl_info", "") ?: ""
+    fun setTogglInfo(ctx: Context, v: String) = p(ctx).edit().putString("toggl_info", v).apply()
+
+    /** Not before this time (ms) is the next attempt; 0 for none. Kept so a restart doesn't forget a back-off. */
+    fun togglNextAt(ctx: Context): Long = p(ctx).getLong("toggl_next", 0L)
+    fun setTogglNextAt(ctx: Context, v: Long) = p(ctx).edit().putLong("toggl_next", v).apply()
+
+    /** Failed runs in a row (the quota doesn't count), for the back-off. */
+    fun togglFailures(ctx: Context): Int = p(ctx).getInt("toggl_failures", 0)
+    fun setTogglFailures(ctx: Context, v: Int) = p(ctx).edit().putInt("toggl_failures", v).apply()
+
+    /** A problem waiting won't fix (token refused, plan): nothing is retried until you ask. Blank when none. */
+    fun togglFatal(ctx: Context): String = p(ctx).getString("toggl_fatal", "") ?: ""
+    fun setTogglFatal(ctx: Context, v: String) = p(ctx).edit().putString("toggl_fatal", v).apply()
+
+    /** The request count and Toggl's quota words, as [com.jono.nowwidget.core.RequestBudget] writes them. */
+    fun togglBudget(ctx: Context): String? = p(ctx).getString("toggl_budget", null)
+    fun setTogglBudget(ctx: Context, v: String) = p(ctx).edit().putString("toggl_budget", v).apply()
+
+    /** "Remove sent entries" is under way (it carries on within the quota), and how many it has removed so far. */
+    fun togglRemoving(ctx: Context): Boolean = p(ctx).getBoolean("toggl_removing", false)
+    fun setTogglRemoving(ctx: Context, v: Boolean) = p(ctx).edit().putBoolean("toggl_removing", v).apply()
+    fun togglRemoved(ctx: Context): Int = p(ctx).getInt("toggl_removed", 0)
+    fun setTogglRemoved(ctx: Context, v: Int) = p(ctx).edit().putInt("toggl_removed", v).apply()
+
+    /** Projects known in a workspace, lowercase name to id (one `workspace<TAB>id<TAB>name` line each). */
+    fun togglProjects(ctx: Context, ws: Long): Map<String, Long> {
+        val out = HashMap<String, Long>()
+        (p(ctx).getString("toggl_projects", "") ?: "").lines().forEach { line ->
+            val f = line.split('\t')
+            if (f.size == 3 && f[0] == ws.toString()) f[1].toLongOrNull()?.let { out[f[2]] = it }
+        }
+        return out
+    }
+
+    fun addTogglProjects(ctx: Context, ws: Long, add: Map<String, Long>) {
+        val keep = (p(ctx).getString("toggl_projects", "") ?: "").lines().filter { l ->
+            val f = l.split('\t')
+            f.size == 3 && !(f[0] == ws.toString() && f[2] in add)
+        }
+        val lines = keep + add.map { (name, id) -> "$ws\t$id\t" + name.replace('\t', ' ').replace('\n', ' ') }
+        p(ctx).edit().putString("toggl_projects", lines.joinToString("\n")).apply()
+    }
+
+    /** The workspace's projects were listed once, so a missing name is created, not searched for again. */
+    fun togglProjectsListed(ctx: Context, ws: Long): Boolean = ws.toString() in (p(ctx).getStringSet("toggl_listed", emptySet()) ?: emptySet())
+    fun setTogglProjectsListed(ctx: Context, ws: Long) =
+        p(ctx).edit().putStringSet("toggl_listed", (p(ctx).getStringSet("toggl_listed", emptySet()) ?: emptySet()) + ws.toString()).apply()
+
+    /** Toggl wouldn't make projects on this workspace's plan: entries go without one. */
+    fun togglNoProjects(ctx: Context, ws: Long): Boolean = ws.toString() in (p(ctx).getStringSet("toggl_noproj", emptySet()) ?: emptySet())
+    fun setTogglNoProjects(ctx: Context, ws: Long) =
+        p(ctx).edit().putStringSet("toggl_noproj", (p(ctx).getStringSet("toggl_noproj", emptySet()) ?: emptySet()) + ws.toString()).apply()
 }

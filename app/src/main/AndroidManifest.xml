@@ -9,6 +9,9 @@
          and reads planned events. Only ever changes events the app made itself. Asked for in Settings. -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <!-- Internet: used only to send your log to Toggl Track (api.track.toggl.com), when you turn that on in Settings.
+         No updater and no install permission here: the Widget Updater app does the updating. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- The Widget Updater, which checks for new builds and installs them. -->
     <queries>
@@ -103,6 +106,11 @@
         <!-- Writes the calendar events about a minute after the last change. -->
         <service
             android:name=".CalendarJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <!-- Sends the log to Toggl at the next attempt time (needs a network). -->
+        <service
+            android:name=".TogglJob"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE" />
         <!-- Redraws the widget when a planned event starts or ends (its activity gets the first button). -->

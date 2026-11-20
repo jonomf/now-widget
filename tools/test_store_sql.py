@@ -317,6 +317,37 @@ def test_calendar_records():
     check(one(db, "SELECT COUNT(*) FROM export_state WHERE target = 'calendar-left'") == 1, 'the left record stays')
 
 
+def test_toggl_records():
+    db = fresh_v2()
+    save = SQL['SAVE_HASH']
+    for key, remote, h in (('2026-11-1/e5', '77:3649001', 'h'), ('2026-11-1/e9', '77:0', 'pending:100:60:t:h'),
+                           ('2026-11-10/e3', '88:3649002', 'h'), ('2026-11-1/e1', '77:3649003', 'why')):
+        db.execute(save, ('toggl' if key != '2026-11-1/e1' else 'toggl-released', key, remote, h, 1))
+    db.execute(save, ('calendar', '2026-11-1/e5', '10:4', 'h', 1))
+    rows = lambda target, day: sorted(r[0] for r in db.execute(SQL['CAL_RECORDS_OF_DAY'], (target, day + '/', day + '0')))
+    check(rows('toggl', '2026-11-1') == ['2026-11-1/e5', '2026-11-1/e9'], "a day's Toggl records, the pending one too")
+    check(rows('toggl-released', '2026-11-1') == ['2026-11-1/e1'], 'released keys are their own target')
+    check(rows('toggl', '2026-11-10') == ['2026-11-10/e3'], '11-10 is not part of 11-1')
+    check(one(db, SQL['TOGGL_SENT_COUNT'], ('toggl',)) == 2, 'sent entries are counted without the pending one')
+    check(one(db, SQL['TOGGL_SENT_COUNT'], ('calendar',)) == 1, 'and per target')
+    pend = db.execute(SQL['CAL_RECORDS_ALL'], ('toggl',)).fetchall()
+    check(('2026-11-1/e9', '77:0', 'pending:100:60:t:h') in pend, 'the pending details come back whole')
+
+    # Renaming an activity marks only days with Toggl records, for Toggl only.
+    db.execute("INSERT INTO export_day (target, day, dirty) VALUES ('toggl', '2026-11-1', 2), ('calendar', '2026-11-20', 0)")
+    db.execute(SQL['CAL_MARK_WRITTEN_BUMP'], ('toggl', 'toggl'))
+    db.execute(SQL['CAL_MARK_WRITTEN_ADD'], ('toggl', 'toggl'))
+    dirty = dict(db.execute(SQL['DIRTY_DAYS'], ('toggl',)).fetchall())
+    check(dirty == {'2026-11-1': 3, '2026-11-10': 1}, f'days with entries dirty, a dirty one bumped once: {dirty}')
+    check(one(db, "SELECT dirty FROM export_day WHERE target = 'calendar'") == 0, 'calendar days untouched')
+
+    # The central mark covers a third target the same way.
+    for t in ('obsidian', 'calendar', 'toggl'):
+        db.execute(SQL['MARK_DAY_DIRTY'], (t, '2026-12-1'))
+        db.execute(SQL['MARK_DAY_DIRTY'], (t, '2026-12-1'))
+    check(dict(db.execute(SQL['DIRTY_DAYS'], ('toggl',)).fetchall()).get('2026-12-1') == 2, 'a change counter per target')
+
+
 def test_group_areas_and_uses():
     db = fresh_v2()
     db.execute(SQL['GROUP_AREA_SET'], ('Work', '12'))
@@ -404,6 +435,7 @@ def main():
     test_export_days()
     test_change_reach()
     test_calendar_records()
+    test_toggl_records()
     test_group_areas_and_uses()
     test_vault_index()
     test_alias_and_rename_sql()
@@ -411,7 +443,7 @@ def main():
     print(f'{len(failures)} failures' if failures else
           f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; '
           'import dedupe (re-import, same-minute notes, native feelings); rollback on failure; '
-          'export dirty days, change counters and hashes; change reach; calendar records by day; areas; vault cache; alias binding and rename; v2 links stay chips')
+          'export dirty days, change counters and hashes; change reach; calendar and Toggl records by day; areas; vault cache; alias binding and rename; v2 links stay chips')
     sys.exit(1 if failures else 0)
 
 

@@ -80,6 +80,13 @@ object StoreSql {
     const val CAL_MARK_WRITTEN_BUMP = "UPDATE export_day SET dirty = dirty + 1 WHERE target = ? AND day IN (SELECT substr(local_key, 1, instr(local_key, '/') - 1) FROM export_state WHERE target = ? AND instr(local_key, '/') > 1)"
     const val CAL_MARK_WRITTEN_ADD = "INSERT OR IGNORE INTO export_day (target, day, dirty) SELECT DISTINCT ?, substr(local_key, 1, instr(local_key, '/') - 1), 1 FROM export_state WHERE target = ? AND instr(local_key, '/') > 1"
 
+    /**
+     * Toggl records use the same statements with target 'toggl' (and 'toggl-released'): local_key the entry key,
+     * remote_id `workspaceId:entryId`, where entry 0 is a pending record (a POST whose answer may be lost).
+     * The entries recorded as sent are the ones that aren't pending (target).
+     */
+    const val TOGGL_SENT_COUNT = "SELECT COUNT(*) FROM export_state WHERE target = ? AND remote_id NOT LIKE '%:0'"
+
     /** Which of your calendars each activity group maps to (its area); '' is ungrouped, a blank calendar is none. */
     const val GROUP_AREAS = "SELECT grp, calendar FROM group_calendar"
     const val GROUP_AREA_SET = "INSERT OR REPLACE INTO group_calendar (grp, calendar) VALUES (?, ?)"
