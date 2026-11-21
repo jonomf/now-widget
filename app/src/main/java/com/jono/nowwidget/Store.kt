@@ -13,11 +13,13 @@ import com.jono.nowwidget.core.CalRecord
 import com.jono.nowwidget.core.CalRecordCodec
 import com.jono.nowwidget.core.CalRef
 import com.jono.nowwidget.core.CalendarSetup
+import com.jono.nowwidget.core.CheckInFlow
 import com.jono.nowwidget.core.Daylio
 import com.jono.nowwidget.core.DaylioData
 import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.Entry
 import com.jono.nowwidget.core.FeelingTag
+import com.jono.nowwidget.core.FlowSettings
 import com.jono.nowwidget.core.IDLE
 import com.jono.nowwidget.core.KeywordRule
 import com.jono.nowwidget.core.PlannedNudge
@@ -451,10 +453,14 @@ object Store {
         return id
     }
 
-    /** The one thing the buttons do. The rules are in [LogRules.tap]. */
-    fun tap(ctx: Context, activityId: Long) {
+    /**
+     * The one thing the buttons do. The rules are in [LogRules.tap]. Returns the new entry's id
+     * when the tap switched to a different activity (that starts the check-in flow); null for
+     * turning off, undoing and the other taps.
+     */
+    fun tap(ctx: Context, activityId: Long): Long? {
         val now = System.currentTimeMillis()
-        if (activityId == lastTapAct && now - lastTapAt < DOUBLE_TAP_MS) return
+        if (activityId == lastTapAct && now - lastTapAt < DOUBLE_TAP_MS) return null
         lastTapAct = activityId
         lastTapAt = now
 
@@ -467,13 +473,23 @@ object Store {
             now = now,
             stepMinutes = Prefs.stepMinutes(ctx),
             inheritedContextId = cur?.let { contextBefore(ctx, it) },
+            // What the check-in flow put on it by itself isn't something you added.
+            inheritedLinks = cur?.let { inheritedLinks(ctx, it) } ?: emptySet(),
         )
-        when (action) {
-            is LogRules.Tap.Start ->
-                insert(ctx, action.activityId, action.at, LogRules.contextForNew(action.activityId, lastContext(ctx)))
-            is LogRules.Tap.MoveBack -> if (cur != null) moveBack(ctx, cur, action.byMs)
-            is LogRules.Tap.Undo -> if (cur != null) deleteEntry(ctx, cur.id)
-            is LogRules.Tap.Replace -> if (cur != null) {
+        return when (action) {
+            is LogRules.Tap.Start -> {
+                val id = insert(ctx, action.activityId, action.at, LogRules.contextForNew(action.activityId, lastContext(ctx)))
+                id.takeIf { action.activityId != IDLE }
+            }
+            is LogRules.Tap.MoveBack -> {
+                if (cur != null) moveBack(ctx, cur, action.byMs)
+                null
+            }
+            is LogRules.Tap.Undo -> {
+                if (cur != null) deleteEntry(ctx, cur.id)
+                null
+            }
+            is LogRules.Tap.Replace -> if (cur == null) null else {
                 // One transaction: the mistake goes, and its replacement keeps its people,
                 // place and context.
                 tx(ctx) {
@@ -482,10 +498,40 @@ object Store {
                     if (at != null) {
                         val id = insert(ctx, activityId, at, cur.contextId)
                         writeLinks(ctx, id, cur.links)
-                    }
+                        id.takeIf { activityId != IDLE }
+                    } else null
                 }
             }
         }
+    }
+
+    // --- The check-in flow's reads (the rules are in core/CheckInFlow.kt) ---
+
+    /** The place of the latest entry before [e] that has one. */
+    fun lastPlaceBefore(ctx: Context, e: Entry): Long? =
+        contextQuery(ctx, StoreSql.LAST_PLACE_BEFORE, args(e.start, e.start, e.id))
+
+    /** The people on the last non-idle entry before [e], in your order of links. */
+    fun previousPeople(ctx: Context, e: Entry): List<Long> {
+        val prev = contextQuery(ctx, StoreSql.PREV_NON_IDLE, args(e.start, e.start, e.id)) ?: return emptyList()
+        val people = allLinks(ctx).filter { it.kind == LinkKind.PERSON }
+        val on = linksFor(ctx, listOf(prev))[prev] ?: emptySet()
+        return people.filter { it.id in on }.map { it.id }
+    }
+
+    /** The place and people the flow would carry over to [e] by itself. */
+    private fun inheritedLinks(ctx: Context, e: Entry): Set<Long> {
+        if (e.links.isEmpty()) return emptySet()
+        return (listOfNotNull(lastPlaceBefore(ctx, e)) + previousPeople(ctx, e)).toSet()
+    }
+
+    /** Link uses since [since], leaving out entry [except] (the one the flow is about). */
+    fun linkUses(ctx: Context, since: Long, except: Long): List<CheckInFlow.Use> {
+        val out = ArrayList<CheckInFlow.Use>()
+        db(ctx).rawQuery(StoreSql.LINK_USES_SINCE, args(since, except)).use { c ->
+            while (c.moveToNext()) out.add(CheckInFlow.Use(c.getLong(0), c.getLong(1)))
+        }
+        return out
     }
 
     private fun contextQuery(ctx: Context, sql: String, a: Array<String>?): Long? =
@@ -550,6 +596,23 @@ object Store {
                 d.insertWithOnConflict("entry_link", null, ContentValues().apply {
                     put("entry_id", entryId)
                     put("link_id", placeId)
+                }, SQLiteDatabase.CONFLICT_IGNORE)
+            }
+        }
+        startOf(ctx, entryId)?.let { dirtyAround(ctx, it) }
+    }
+
+    /** Sets who an entry was with: exactly [people] (person links); places and other links stay. */
+    fun setPeople(ctx: Context, entryId: Long, people: Set<Long>) {
+        tx(ctx) { d ->
+            d.execSQL(
+                "DELETE FROM entry_link WHERE entry_id = ? AND link_id IN (SELECT id FROM link WHERE kind = ?)",
+                arrayOf<Any>(entryId, LinkKind.PERSON),
+            )
+            people.forEach { p ->
+                d.insertWithOnConflict("entry_link", null, ContentValues().apply {
+                    put("entry_id", entryId)
+                    put("link_id", p)
                 }, SQLiteDatabase.CONFLICT_IGNORE)
             }
         }
@@ -1406,6 +1469,24 @@ object Prefs {
 
     fun lockButtons(ctx: Context): Int = p(ctx).getInt("lock_buttons", 5)
     fun setLockButtons(ctx: Context, v: Int) = p(ctx).edit().putInt("lock_buttons", v).apply()
+
+    /** The check-in flow after a switch: which steps it asks, and whether skipping keeps the defaults. */
+    fun flowSettings(ctx: Context): FlowSettings = p(ctx).let {
+        FlowSettings(
+            where = it.getBoolean("flow_where", true),
+            who = it.getBoolean("flow_who", true),
+            feeling = it.getBoolean("flow_feeling", true),
+            keepDefaults = it.getBoolean("flow_keep", true),
+        )
+    }
+    fun setFlowSetting(ctx: Context, key: String, on: Boolean) = p(ctx).edit().putBoolean(key, on).apply()
+
+    /** The running check-in flow (core FlowState.encode), kept across process deaths. */
+    fun flowState(ctx: Context): String? = p(ctx).getString("flow_state", null)
+    fun setFlowState(ctx: Context, v: String?) {
+        // commit: the next tap may come in a new process right after this one dies.
+        if (v == null) p(ctx).edit().remove("flow_state").commit() else p(ctx).edit().putString("flow_state", v).commit()
+    }
 
     // --- Obsidian vault ---
 

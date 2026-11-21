@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The check-in flow's steps, "Where · Who · Feeling", with the current one in bold. -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/flow_steps"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="1dp"
+    android:ellipsize="end"
+    android:gravity="center_horizontal"
+    android:includeFontPadding="false"
+    android:singleLine="true"
+    android:textColor="@color/widget_subtext"
+    android:textSize="11sp" />

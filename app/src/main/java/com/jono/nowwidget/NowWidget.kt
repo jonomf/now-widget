@@ -7,6 +7,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import com.jono.nowwidget.core.FlowStep
+import com.jono.nowwidget.core.FlowTap
 
 class NowWidget : AppWidgetProvider() {
 
@@ -20,7 +22,12 @@ class NowWidget : AppWidgetProvider() {
         val id = intent.data?.lastPathSegment?.toLongOrNull()
         when (intent.action) {
             ACTION_TAP -> if (id != null) {
-                Store.tap(ctx, id)
+                // A switch to a different activity starts the where → who → feeling flow.
+                Store.tap(ctx, id)?.let { CheckIn.start(ctx, it) }
+                WidgetRenderer.refresh(ctx)
+            }
+            ACTION_FLOW -> {
+                parseFlow(intent.data)?.let { (step, tap) -> CheckIn.tap(ctx, tap, step) }
                 WidgetRenderer.refresh(ctx)
             }
             // Person chips from build 6 used ACTION_PERSON; people kept their ids as links.
@@ -39,6 +46,7 @@ class NowWidget : AppWidgetProvider() {
         private const val ACTION_PERSON = "com.jono.nowwidget.PERSON"
         private const val ACTION_LINK = "com.jono.nowwidget.LINK"
         private const val ACTION_DISMISSED = "com.jono.nowwidget.DISMISSED"
+        private const val ACTION_FLOW = "com.jono.nowwidget.FLOW"
 
         private fun broadcast(ctx: Context, action: String, uri: String): PendingIntent =
             PendingIntent.getBroadcast(
@@ -50,6 +58,27 @@ class NowWidget : AppWidgetProvider() {
         fun tapIntent(ctx: Context, activityId: Long) = broadcast(ctx, ACTION_TAP, "now://activity/$activityId")
         fun linkIntent(ctx: Context, linkId: Long) = broadcast(ctx, ACTION_LINK, "now://link/$linkId")
         fun dismissedIntent(ctx: Context) = broadcast(ctx, ACTION_DISMISSED, "now://dismissed/0")
+
+        /** A check-in flow chip or button, drawn for [step]: now://flow/<step>/<key>/<id>. */
+        fun flowIntent(ctx: Context, step: FlowStep, key: String, id: Long) =
+            broadcast(ctx, ACTION_FLOW, "now://flow/${step.name}/$key/$id")
+
+        private fun parseFlow(uri: Uri?): Pair<FlowStep, FlowTap>? {
+            val seg = uri?.pathSegments ?: return null
+            if (seg.size != 3) return null
+            val step = FlowStep.values().firstOrNull { it.name == seg[0] } ?: return null
+            val id = seg[2].toLongOrNull() ?: return null
+            val tap = when (seg[1]) {
+                "pick" -> FlowTap.Pick(id)
+                "mood" -> FlowTap.Mood(id)
+                "skip" -> FlowTap.Skip
+                "next" -> FlowTap.Next
+                "none" -> FlowTap.None
+                "done" -> FlowTap.Done
+                else -> return null
+            }
+            return step to tap
+        }
     }
 }
 

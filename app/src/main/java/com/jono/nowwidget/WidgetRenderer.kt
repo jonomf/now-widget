@@ -8,13 +8,24 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Typeface
 import android.os.SystemClock
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.StyleSpan
 import android.util.SizeF
 import android.util.TypedValue
 import android.view.View
 import android.widget.RemoteViews
 import com.jono.nowwidget.core.Act
+import com.jono.nowwidget.core.CheckInFlow
 import com.jono.nowwidget.core.Entry
+import com.jono.nowwidget.core.FlowCell
+import com.jono.nowwidget.core.FlowControl
+import com.jono.nowwidget.core.FlowOption
+import com.jono.nowwidget.core.FlowState
+import com.jono.nowwidget.core.FlowStep
+import com.jono.nowwidget.core.FlowView
 import com.jono.nowwidget.core.Link
 import com.jono.nowwidget.core.LinkKind
 import com.jono.nowwidget.core.LogRules
@@ -44,6 +55,10 @@ class Snapshot(
     val idleSince: Long?,
     /** What a planned event happening now suggests: it goes on the first button. */
     val nudge: Act? = null,
+    /** The check-in flow after a switch (where → who → feeling), while it runs. */
+    val flow: FlowState? = null,
+    /** The current step's chips, best first (all of them; each size takes what fits). */
+    val flowOptions: List<FlowOption> = emptyList(),
 ) {
     /** The buttons for [n] slots: the usual picks, with the planned one first. */
     fun picks(n: Int): List<Act> = LogRules.withNudge(Store.picks(buttons, act, n, scores, smart), nudge, act, n)
@@ -136,6 +151,7 @@ object WidgetRenderer {
             .mapNotNull { (id, ms) -> byId[id]?.let { it to ms } }
             .sortedByDescending { it.second }
         val buttons = acts.filter { it.show && !it.archived }
+        val flow = CheckIn.current(ctx, cur, links, now)
         return Snapshot(
             now = now,
             cur = cur,
@@ -155,7 +171,21 @@ object WidgetRenderer {
             sinceText = (cur?.start ?: idle)?.let { Fmt.since(ctx, it) } ?: "",
             idleSince = idle,
             nudge = nudge(ctx, now, buttons, byId),
+            flow = flow,
+            flowOptions = if (flow == null) emptyList() else flowOptions(ctx, flow, links, now),
         )
+    }
+
+    private fun flowOptions(ctx: Context, flow: FlowState, links: List<Link>, now: Long): List<FlowOption> {
+        val scores = if (flow.step == FlowStep.FEELING) emptyMap()
+        else CheckInFlow.scores(Store.linkUses(ctx, now - CheckInFlow.HISTORY_MS, flow.entryId), now)
+        return CheckInFlow.options(
+            flow,
+            CheckIn.chipLinks(links, LinkKind.PLACE),
+            CheckIn.chipLinks(links, LinkKind.PERSON),
+            Store.allMoods(ctx),
+            scores,
+        ) { moodFace(it) }
     }
 
     /**
@@ -183,12 +213,26 @@ object WidgetRenderer {
     }
 
     /** The floating panel: every button, people, places and today's breakdown. */
-    fun buildPanel(ctx: Context): RemoteViews {
-        val s = snapshot(ctx)
+    fun buildPanel(ctx: Context): RemoteViews = buildPanel(ctx, snapshot(ctx))
+
+    fun buildPanel(ctx: Context, s: Snapshot): RemoteViews {
         val rv = RemoteViews(ctx.packageName, R.layout.widget_block)
         head(ctx, rv, s, showSince = true, withTotal = true, withPlace = true, withContext = true)
         rv.setOnClickPendingIntent(R.id.head, openApp(ctx))
         bar(rv, barBitmap(s))
+        val flow = s.flow
+        if (flow != null) {
+            // The whole step at full size: this is where the 1×1 and the small strips send you.
+            val view = CheckInFlow.block(flow, s.act?.name ?: "", s.flowOptions, PANEL_COLS, PANEL_ROWS)
+            rv.setTextViewText(R.id.cur_name, view.head)
+            clear(rv, R.id.people_inline)
+            clear(rv, R.id.people_row)
+            clear(rv, R.id.places_row)
+            clear(rv, R.id.context_row)
+            flowGrid(ctx, rv, R.id.grid, R.layout.row, R.layout.slot_big, view)
+            breakdown(ctx, rv, s, 0)
+            return rv
+        }
         clear(rv, R.id.people_inline)
         people(ctx, rv, R.id.people_row, s, 5, names = true)
         places(ctx, rv, R.id.places_row, s, PANEL_PLACES)
@@ -204,6 +248,12 @@ object WidgetRenderer {
         head(ctx, rv, s, showSince = k != Kind.TILE, withTotal = isBlock, withPlace = k.placeInHead,
             withContext = k.contextInHead)
         rv.setOnClickPendingIntent(R.id.head, if (k.expands) openPanel(ctx) else openApp(ctx))
+        val flow = s.flow
+        if (k == Kind.TILE) tile(ctx, rv, s)
+        if (flow != null && k != Kind.TILE) {
+            fillFlow(ctx, k, rv, s, flow, barBmp)
+            return rv
+        }
 
         if (k.layout == R.layout.widget_strip) {
             rv.setViewLayoutWidth(R.id.head, k.headDp, TypedValue.COMPLEX_UNIT_DIP)
@@ -224,6 +274,117 @@ object WidgetRenderer {
         }
         return rv
     }
+
+    /**
+     * The 1×1: in the flow it shows the question and one chip that accepts the default ("📍 Loft?");
+     * the question opens the panel with the whole step. Otherwise the chip is hidden.
+     */
+    private fun tile(ctx: Context, rv: RemoteViews, s: Snapshot) {
+        val flow = s.flow
+        if (flow == null) {
+            rv.setViewVisibility(R.id.flow_chip, View.GONE)
+            return
+        }
+        val t = CheckInFlow.tile(flow, s.flowOptions)
+        rv.setTextViewText(R.id.cur_name, t.question)
+        rv.setViewVisibility(R.id.cur_elapsed, View.GONE) // room for the chip
+        rv.setViewVisibility(R.id.flow_chip, View.VISIBLE)
+        rv.setTextViewText(R.id.flow_chip, t.chip)
+        rv.setOnClickPendingIntent(R.id.flow_chip, controlIntent(ctx, flow.step, t.control))
+    }
+
+    /** A strip or block size while the flow runs: the head asks, the button area holds the step. */
+    private fun fillFlow(ctx: Context, k: Kind, rv: RemoteViews, s: Snapshot, flow: FlowState, barBmp: Bitmap?) {
+        val name = s.act?.name ?: ""
+        if (k.layout == R.layout.widget_strip) {
+            val view = CheckInFlow.strip(flow, name, s.flowOptions, k.cols)
+            rv.setViewLayoutWidth(R.id.head, k.headDp, TypedValue.COMPLEX_UNIT_DIP)
+            rv.setTextViewText(R.id.cur_name, view.head)
+            rv.setTextViewText(R.id.cur_since, stepText(view.steps))
+            flowGrid(ctx, rv, R.id.slots, R.layout.row, R.layout.slot_compact, view.copy(steps = null))
+            return
+        }
+        val view = CheckInFlow.block(flow, name, s.flowOptions, k.cols, k.rows)
+        rv.setTextViewText(R.id.cur_name, view.head)
+        bar(rv, barBmp)
+        // The step has the room; every optional part is still set, since sizes share this layout.
+        clear(rv, R.id.people_inline)
+        clear(rv, R.id.people_row)
+        clear(rv, R.id.places_row)
+        clear(rv, R.id.context_row)
+        flowGrid(ctx, rv, R.id.grid, R.layout.row, R.layout.slot, view)
+        breakdown(ctx, rv, s, 0)
+    }
+
+    /** "Where · Who · Feeling" with the current step in bold. */
+    private fun stepText(steps: List<Pair<FlowStep, Boolean>>?): CharSequence {
+        val b = SpannableStringBuilder()
+        steps.orEmpty().forEachIndexed { i, (step, now) ->
+            if (i > 0) b.append(" · ")
+            val from = b.length
+            b.append(step.title)
+            if (now) b.setSpan(StyleSpan(Typeface.BOLD), from, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        return b
+    }
+
+    /** Fills [container] with the step line (if [view] has one) and the flow's rows of cells. */
+    fun flowGrid(ctx: Context, rv: RemoteViews, container: Int, rowLayout: Int, slotLayout: Int, view: FlowView) {
+        rv.removeAllViews(container)
+        rv.setViewVisibility(container, View.VISIBLE)
+        if (view.steps != null) {
+            val line = RemoteViews(ctx.packageName, R.layout.flow_steps)
+            line.setTextViewText(R.id.flow_steps, stepText(view.steps))
+            rv.addView(container, line)
+        }
+        view.rows.forEach { cells ->
+            val row = RemoteViews(ctx.packageName, rowLayout)
+            flowRow(ctx, row, R.id.row, slotLayout, view.step, cells)
+            rv.addView(container, row)
+        }
+    }
+
+    /** Adds one row's cells to [row] (a horizontal container). */
+    fun flowRow(ctx: Context, rv: RemoteViews, row: Int, slotLayout: Int, step: FlowStep, cells: List<FlowCell>) {
+        cells.forEach { rv.addView(row, flowCell(ctx, slotLayout, step, it)) }
+    }
+
+    private fun flowCell(ctx: Context, layout: Int, step: FlowStep, cell: FlowCell): RemoteViews {
+        val v = RemoteViews(ctx.packageName, layout)
+        val o = cell.option
+        val c = cell.control
+        when {
+            o != null -> {
+                v.setViewVisibility(R.id.slot_root, View.VISIBLE)
+                v.setTextViewText(R.id.slot_emoji, o.emoji)
+                v.setViewVisibility(R.id.slot_emoji, if (o.emoji.isBlank()) View.GONE else View.VISIBLE)
+                v.setTextViewText(R.id.slot_label, o.label)
+                v.setViewVisibility(R.id.slot_label, if (o.label.isBlank()) View.GONE else View.VISIBLE)
+                v.setInt(R.id.slot_root, "setBackgroundResource", if (o.on) R.drawable.slot_on else R.drawable.slot_off)
+                v.setOnClickPendingIntent(R.id.slot_root, optionIntent(ctx, step, o))
+            }
+            c != null -> {
+                v.setViewVisibility(R.id.slot_root, View.VISIBLE)
+                val note = c == FlowControl.NOTE
+                v.setTextViewText(R.id.slot_emoji, if (note) c.label else "")
+                v.setViewVisibility(R.id.slot_emoji, if (note) View.VISIBLE else View.GONE)
+                v.setTextViewText(R.id.slot_label, if (note) "Note" else c.label)
+                v.setViewVisibility(R.id.slot_label, View.VISIBLE)
+                v.setInt(R.id.slot_root, "setBackgroundResource", R.drawable.slot_off)
+                v.setOnClickPendingIntent(R.id.slot_root, controlIntent(ctx, step, c))
+            }
+            else -> v.setViewVisibility(R.id.slot_root, View.INVISIBLE)
+        }
+        return v
+    }
+
+    /** On the feeling step the chips are mood faces (mood ids); before it, links. */
+    private fun optionIntent(ctx: Context, step: FlowStep, o: FlowOption): PendingIntent =
+        NowWidget.flowIntent(ctx, step, if (step == FlowStep.FEELING) "mood" else "pick", o.id)
+
+    /** A flow button: 📝 opens the check-in box (and ends the flow there); the rest go to the widget. */
+    fun controlIntent(ctx: Context, step: FlowStep, c: FlowControl): PendingIntent =
+        if (c == FlowControl.NOTE) openNote(ctx, fromFlow = true) else NowWidget.flowIntent(ctx, step, c.key, 0)
 
     private fun head(
         ctx: Context,
@@ -413,9 +574,12 @@ object WidgetRenderer {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
-    private fun openNote(ctx: Context): PendingIntent = PendingIntent.getActivity(
-        ctx, 3,
-        Intent(ctx, NoteActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+    /** [fromFlow]: the flow's 📝, which ends the flow and opens a new check-in for the new activity. */
+    private fun openNote(ctx: Context, fromFlow: Boolean = false): PendingIntent = PendingIntent.getActivity(
+        ctx, if (fromFlow) 5 else 3,
+        Intent(ctx, NoteActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .putExtra(NoteActivity.EXTRA_FROM_FLOW, fromFlow),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 

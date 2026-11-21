@@ -20,6 +20,15 @@ object StoreSql {
     /** The context of the last non-idle entry before one (start, start, id). */
     const val CONTEXT_BEFORE = "SELECT context_id FROM entry WHERE activity_id <> 0 AND (start_ms < ? OR (start_ms = ? AND id < ?)) ORDER BY start_ms DESC, id DESC LIMIT 1"
 
+    /** Check-in flow: the place of the latest entry with one before an entry (start, start, id). */
+    const val LAST_PLACE_BEFORE = "SELECT el.link_id FROM entry e JOIN entry_link el ON el.entry_id = e.id JOIN link l ON l.id = el.link_id WHERE l.kind = 'place' AND (e.start_ms < ? OR (e.start_ms = ? AND e.id < ?)) ORDER BY e.start_ms DESC, e.id DESC, el.link_id LIMIT 1"
+
+    /** Check-in flow: the last non-idle entry before an entry (start, start, id), for its people. */
+    const val PREV_NON_IDLE = "SELECT id FROM entry WHERE activity_id <> 0 AND (start_ms < ? OR (start_ms = ? AND id < ?)) ORDER BY start_ms DESC, id DESC LIMIT 1"
+
+    /** Check-in flow ranking: every link use since a time, leaving one entry out (since, entry id). */
+    const val LINK_USES_SINCE = "SELECT el.link_id, e.start_ms FROM entry_link el JOIN entry e ON e.id = el.entry_id WHERE e.start_ms >= ? AND e.id <> ?"
+
     /** Import dedupe: the note of the moment with this key, if any. */
     const val NOTE_AT_KEY = "SELECT text FROM moment WHERE source_key = ? LIMIT 1"
     const val KEY_TAKEN = "SELECT 1 FROM moment WHERE source_key = ? LIMIT 1"

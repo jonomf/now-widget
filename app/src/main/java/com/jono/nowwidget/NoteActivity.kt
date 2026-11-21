@@ -40,6 +40,13 @@ class NoteActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The check-in flow's 📝: the flow ends on the widget, and the box starts a new check-in
+        // for what you just switched to.
+        val fromFlow = intent?.getBooleanExtra(EXTRA_FROM_FLOW, false) == true
+        if (fromFlow && savedInstanceState == null) {
+            CheckIn.end(this)
+            WidgetRenderer.refresh(this)
+        }
         val cur = Store.current(this)
         val act = cur?.let { c -> Store.allActs(this).firstOrNull { it.id == c.activityId } }
         val links = Store.allLinks(this)
@@ -59,6 +66,8 @@ class NoteActivity : Activity() {
         loaded = if (saved) {
             val id = s!!.getLong(KEY_LOADED, -1L)
             moments.firstOrNull { it.id == id }
+        } else if (fromFlow) {
+            null
         } else {
             moments.getOrNull(CheckInNav.openAt(moments.size))
         }
@@ -286,14 +295,15 @@ class NoteActivity : Activity() {
         dialog.dismiss()
     }
 
-    private companion object {
-        const val KEY_LOADED = "loaded"
-        const val KEY_MOOD = "mood"
-        const val KEY_TAGS = "tags"
-        const val KEY_TEXT = "text"
-        const val KEY_WHERE = "where"
-        const val KEY_WHERE_TOUCHED = "whereTouched"
-        const val KEY_CONTEXT = "context"
-        const val KEY_CONTEXT_TOUCHED = "contextTouched"
+    companion object {
+        const val EXTRA_FROM_FLOW = "from_flow"
+        private const val KEY_LOADED = "loaded"
+        private const val KEY_MOOD = "mood"
+        private const val KEY_TAGS = "tags"
+        private const val KEY_TEXT = "text"
+        private const val KEY_WHERE = "where"
+        private const val KEY_WHERE_TOUCHED = "whereTouched"
+        private const val KEY_CONTEXT = "context"
+        private const val KEY_CONTEXT_TOUCHED = "contextTouched"
     }
 }

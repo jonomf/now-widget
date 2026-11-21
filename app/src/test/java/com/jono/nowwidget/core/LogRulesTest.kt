@@ -92,6 +92,21 @@ class LogRulesTest {
     }
 
     @Test
+    fun linksTheFlowCarriedOverDontCountAsMarked() {
+        val prev = Entry(1, 5, now - 10 * m)
+        // The flow put the last place (9) and the people before (8) on it by itself.
+        val auto = Entry(2, 6, now - 20_000L, links = setOf(9L, 8L))
+        assertTrue(!LogRules.marked(auto, null, setOf(8L, 9L)))
+        // So a mistaken switch still drops back, and tapping it again still undoes it.
+        assertEquals(LogRules.Tap.Replace(null), LogRules.tap(auto, false, prev, 5, now, 0, null, setOf(8L, 9L)))
+        assertEquals(LogRules.Tap.Undo, LogRules.tap(auto, false, prev, 6, now, 0, null, setOf(8L, 9L)))
+        // One you added yourself still counts.
+        val added = auto.copy(links = setOf(9L, 7L))
+        assertTrue(LogRules.marked(added, null, setOf(8L, 9L)))
+        assertEquals(LogRules.Tap.Start(IDLE, now), LogRules.tap(added, false, prev, 6, now, 0, null, setOf(8L, 9L)))
+    }
+
+    @Test
     fun contextIsStickyButNotForIdle() {
         assertEquals(4L, LogRules.contextForNew(7, 4L))
         assertEquals(null, LogRules.contextForNew(IDLE, 4L))

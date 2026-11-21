@@ -78,10 +78,12 @@ object LogRules {
     /**
      * True when the latest entry carries something you added by hand: a person or place, or a
      * context other than the one it inherited. [inheritedContextId] is the context of the last
-     * non-idle entry before it (what a new entry picks up on its own).
+     * non-idle entry before it (what a new entry picks up on its own); [inheritedLinks] are the
+     * place and people the check-in flow carried over on its own (the last place, the people
+     * before), which don't count either.
      */
-    fun marked(latest: Entry, inheritedContextId: Long?): Boolean =
-        latest.links.isNotEmpty() || (latest.contextId != null && latest.contextId != inheritedContextId)
+    fun marked(latest: Entry, inheritedContextId: Long?, inheritedLinks: Set<Long> = emptySet()): Boolean =
+        (latest.links - inheritedLinks).isNotEmpty() || (latest.contextId != null && latest.contextId != inheritedContextId)
 
     /**
      * - A different activity: it starts now, and that ends the last one.
@@ -100,10 +102,11 @@ object LogRules {
         now: Long,
         stepMinutes: Int,
         inheritedContextId: Long? = null,
+        inheritedLinks: Set<Long> = emptySet(),
     ): Tap {
         if (latest == null) return Tap.Start(activityId, now)
         val fresh = now - latest.start < GRACE_MS && !latestHasMoments
-        val isMarked = marked(latest, inheritedContextId)
+        val isMarked = marked(latest, inheritedContextId, inheritedLinks)
         if (latest.activityId == activityId) {
             return when {
                 stepMinutes > 0 -> Tap.MoveBack(stepMinutes * 60_000L)

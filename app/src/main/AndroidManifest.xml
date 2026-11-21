@@ -119,6 +119,11 @@
             android:name=".NudgeJob"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE" />
+        <!-- Redraws the widget when the check-in flow (where / who / feeling) times out. -->
+        <service
+            android:name=".FlowJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
         <!-- App-icon long-press "Claude session" shortcut (ClaudeLink.syncShortcut) opens this. -->
         <activity
             android:name=".ClaudeLinkActivity"

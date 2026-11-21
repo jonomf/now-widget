@@ -93,6 +93,31 @@ def test_sticky_context():
     check(one(db, SQL['LAST_CONTEXT']) is None, 'a cleared context stays cleared')
 
 
+# --- Check-in flow: defaults and ranking ---
+
+def test_flow_defaults_and_uses():
+    db = fresh_v2()
+    db.execute("INSERT INTO link (id, title, kind) VALUES (1, 'Loft', 'place'), (2, 'Park', 'place'), (3, 'Sam', 'person'), (4, 'Kim', 'person'), (5, 'Trip', 'context')")
+    check(one(db, SQL['LAST_PLACE_BEFORE'], (100, 100, 1)) is None, 'no entries: no last place')
+    db.execute('INSERT INTO entry (id, activity_id, start_ms) VALUES (1, 3, 100)')
+    db.execute('INSERT INTO entry_link (entry_id, link_id) VALUES (1, 1), (1, 3)')
+    db.execute('INSERT INTO entry (id, activity_id, start_ms) VALUES (2, 4, 200)')
+    db.execute('INSERT INTO entry_link (entry_id, link_id) VALUES (2, 4), (2, 5)')  # people and a non-place link, no place
+    db.execute('INSERT INTO entry (id, activity_id, start_ms) VALUES (3, 0, 300)')   # idle
+    db.execute('INSERT INTO entry (id, activity_id, start_ms) VALUES (4, 5, 400)')   # the new one
+    db.execute('INSERT INTO entry_link (entry_id, link_id) VALUES (4, 2)')
+    check(one(db, SQL['LAST_PLACE_BEFORE'], (400, 400, 4)) == 1, 'last place skips entries with no place and the new entry itself')
+    check(one(db, SQL['PREV_NON_IDLE'], (400, 400, 4)) == 2, 'previous non-idle entry skips the idle gap')
+    # Same start, lower id comes before.
+    db.execute('INSERT INTO entry (id, activity_id, start_ms) VALUES (5, 6, 400)')
+    check(one(db, SQL['PREV_NON_IDLE'], (400, 400, 5)) == 4, 'same start: the lower id is before')
+    check(one(db, SQL['LAST_PLACE_BEFORE'], (400, 400, 5)) == 2, 'same start: its place counts')
+    uses = sorted(db.execute(SQL['LINK_USES_SINCE'], (150, 4)).fetchall())
+    check(uses == [(4, 200), (5, 200)], 'uses since a time, without the excluded entry: %r' % uses)
+    uses = sorted(db.execute(SQL['LINK_USES_SINCE'], (0, 0)).fetchall())
+    check(len(uses) == 5, 'every use counts once')
+
+
 # --- Daylio import ---
 
 PREDEF = {1: 'rad', 2: 'good', 3: 'meh', 4: 'bad', 5: 'awful'}
@@ -444,6 +469,7 @@ def test_v2_links_stay_chips_after_a_scan():
 def main():
     test_delete_detaches()
     test_sticky_context()
+    test_flow_defaults_and_uses()
     test_import()
     test_export_days()
     test_change_reach()
@@ -454,7 +480,7 @@ def main():
     test_alias_and_rename_sql()
     test_v2_links_stay_chips_after_a_scan()
     print(f'{len(failures)} failures' if failures else
-          f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; '
+          f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; check-in flow defaults and uses; '
           'import dedupe (re-import, same-minute notes, native feelings); rollback on failure; '
           'export dirty days, change counters and hashes; change reach; calendar and Toggl records by day; areas; vault cache; alias binding and rename; v2 links stay chips')
     sys.exit(1 if failures else 0)

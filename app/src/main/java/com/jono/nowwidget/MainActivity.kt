@@ -107,6 +107,15 @@ class MainActivity : Activity() {
         ) { on -> Prefs.setSmartOrder(this, on) })
         col.addView(note("When your activities don't all fit, the buttons show what you usually do at this time of day."))
 
+        // --- Check-in after each switch ---
+        col.addView(note("After you switch, the widget asks where you are, who you're with and how you feel, one step at a time. Ignore it and it goes back to the buttons after 90 seconds."))
+        val flow = Prefs.flowSettings(this)
+        col.addView(flowToggle("Ask where after each switch", "flow_where", flow.where))
+        col.addView(flowToggle("Ask who after each switch", "flow_who", flow.who))
+        col.addView(flowToggle("Ask how I feel after each switch", "flow_feeling", flow.feeling))
+        col.addView(flowToggle("Keep last place and people if I skip", "flow_keep", flow.keepDefaults))
+        col.addView(note("On: a new activity starts with your last place and the people you were with, until you change them. Off: they're only suggested, and saved when you tap Next."))
+
         // --- Lock screen ---
         col.addView(heading("Lock screen"))
         col.addView(toggle(
@@ -360,6 +369,12 @@ class MainActivity : Activity() {
     private fun button(label: String, onTap: () -> Unit) = Button(this).apply {
         text = label
         setOnClickListener { onTap() }
+    }
+
+    /** A check-in flow setting: a change applies from the next switch, so any flow running now ends. */
+    private fun flowToggle(label: String, key: String, on: Boolean) = toggle(label, on) { v ->
+        Prefs.setFlowSetting(this, key, v)
+        CheckIn.end(this)
     }
 
     private fun toggle(label: String, on: Boolean, onChange: (Boolean) -> Unit) = Switch(this).apply {

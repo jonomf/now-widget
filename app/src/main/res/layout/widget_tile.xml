@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 1×1: what you're doing and for how long. Tap to change it; the corner button adds a note. -->
+<!-- 1×1: what you're doing and for how long. Tap to change it; the corner button adds a note.
+     After a switch it asks where / who / how you feel, with the default as a chip. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/root"
     android:layout_width="match_parent"
@@ -29,6 +30,24 @@
             android:layout_marginTop="1dp"
             android:gravity="center_horizontal"
             android:textSize="11sp" />
+
+        <!-- The check-in flow: the step's default ("📍 Loft?"). Tap to accept it. -->
+        <TextView
+            android:id="@+id/flow_chip"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:background="@drawable/slot_on"
+            android:ellipsize="end"
+            android:includeFontPadding="false"
+            android:paddingStart="6dp"
+            android:paddingTop="4dp"
+            android:paddingEnd="6dp"
+            android:paddingBottom="4dp"
+            android:singleLine="true"
+            android:textColor="@color/widget_text"
+            android:textSize="11sp"
+            android:visibility="gone" />
     </LinearLayout>
 
     <TextView
