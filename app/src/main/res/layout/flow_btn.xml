@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A check-in flow control (Skip / Next / None / Done / 📝) in a full-width row of equal buttons. -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/flow_btn"
+    style="@style/FlowButton"
+    android:layout_width="0dp"
+    android:layout_height="match_parent"
+    android:layout_weight="1"
+    android:minHeight="44dp"
+    android:textSize="14sp" />

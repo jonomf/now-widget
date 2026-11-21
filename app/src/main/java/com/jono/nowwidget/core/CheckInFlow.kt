@@ -125,21 +125,47 @@ sealed class FlowEffect {
 }
 
 /** A chip in the flow: a place, a person or a mood face. */
-data class FlowOption(val id: Long, val emoji: String, val label: String, val on: Boolean)
+data class FlowOption(
+    val id: Long,
+    val emoji: String,
+    val label: String,
+    val on: Boolean,
+    val type: OptionType = OptionType.LINK,
+)
 
-/** One cell of a flow grid: an option, a control, or an empty filler that keeps the columns even. */
-data class FlowCell(val option: FlowOption? = null, val control: FlowControl? = null) {
-    val filler: Boolean get() = option == null && control == null
+enum class OptionType {
+    /** A place or a person (id = link id). */
+    LINK,
+    /** A mood face (id = mood id). */
+    MOOD,
+    /** "🔍 Find…": the type-ahead picker over every person or place, in the panel. */
+    FIND,
+    /** "Add people in Customize": there are none yet; opens the app. */
+    HINT,
 }
+
+/** One cell of a flow grid: an option, or an empty filler that keeps the columns even. */
+data class FlowCell(val option: FlowOption? = null) {
+    val filler: Boolean get() = option == null
+}
+
+/**
+ * The strips' controls column at the right edge: [top] is the big button (filled when it's Next),
+ * [bottom] the one or two that share the bottom half.
+ */
+data class FlowColumn(val top: FlowControl, val bottom: List<FlowControl>)
 
 /** What a widget size shows for the flow, as data. */
 data class FlowView(
     val step: FlowStep,
     /** "Hobby · where?" (the emoji has its own view). */
     val head: String,
+    /** Rows of chips only; the controls are [controls]. */
     val rows: List<List<FlowCell>>,
     /** Every step with whether it's the current one, for "Where · Who · Feeling". Null: no room. */
     val steps: List<Pair<FlowStep, Boolean>>?,
+    /** The controls, as one full-width row of equal buttons (blocks, panel, notification). */
+    val controls: List<FlowControl>,
 )
 
 /** The 1×1: the question, and one chip that accepts the default. */
@@ -301,36 +327,53 @@ object CheckInFlow {
 
     // --- What each size shows ---
 
-    /** The buttons after the chips, in the order they show. */
+    /** The controls, in the order they show. */
     fun controls(step: FlowStep): List<FlowControl> = when (step) {
         FlowStep.WHERE -> listOf(FlowControl.SKIP, FlowControl.NEXT, FlowControl.DONE)
         FlowStep.WHO -> listOf(FlowControl.NONE, FlowControl.NEXT, FlowControl.DONE)
         FlowStep.FEELING -> listOf(FlowControl.SKIP, FlowControl.NOTE)
     }
 
-    /**
-     * When only [n] fit, the ones to keep (still shown in [controls] order). Where: tapping the
-     * highlighted place already does Next. Who: Next carries the choice. The rest is in the panel.
-     */
-    fun controls(step: FlowStep, n: Int): List<FlowControl> {
-        val all = controls(step)
-        if (n >= all.size) return all
-        val priority = when (step) {
-            FlowStep.WHERE -> listOf(FlowControl.SKIP, FlowControl.DONE, FlowControl.NEXT)
-            FlowStep.WHO -> listOf(FlowControl.NEXT, FlowControl.DONE, FlowControl.NONE)
-            FlowStep.FEELING -> listOf(FlowControl.SKIP, FlowControl.NOTE)
-        }
-        val keep = priority.take(maxOf(0, n)).toSet()
-        return all.filter { it in keep }
+    /** Next is the main button (filled); the rest are plain. */
+    fun primary(c: FlowControl): Boolean = c == FlowControl.NEXT
+
+    /** The strips' controls column: Next big on top, the others side by side below it. */
+    fun column(step: FlowStep): FlowColumn = when (step) {
+        FlowStep.WHERE -> FlowColumn(FlowControl.NEXT, listOf(FlowControl.SKIP, FlowControl.DONE))
+        FlowStep.WHO -> FlowColumn(FlowControl.NEXT, listOf(FlowControl.NONE, FlowControl.DONE))
+        FlowStep.FEELING -> FlowColumn(FlowControl.SKIP, listOf(FlowControl.NOTE))
     }
 
     /** Where and who may show on the lock screen; how you feel never does. */
     fun onLockScreen(state: FlowState?): Boolean = state != null && state.step != FlowStep.FEELING
 
     /**
-     * The chips for the current step. Where: the default place first, then by [scores]. Who: the
-     * default people first, then by score. Feeling: [moods] (active, by level) with names when two
-     * share a level, as in the 📝 box.
+     * Every person or place that could be chosen, best first: [first] (the defaults), then the
+     * chips (ones you made, pinned or used) by [scores], then the rest (the vault's notes you
+     * haven't used in Now yet) by score, then by name. Removed ones are left out.
+     */
+    fun candidates(links: List<Link>, scores: Map<Long, Double>, first: List<Long>): List<Link> {
+        val live = links.filter { !it.archived }
+        val byId = live.associateBy { it.id }
+        val head = first.distinct().mapNotNull { byId[it] }
+        val headIds = head.map { it.id }.toSet()
+        val rest = live.filter { it.id !in headIds }
+        val chips = rest.filter { it.chip }
+            .sortedWith(compareByDescending<Link> { scores[it.id] ?: 0.0 }.thenBy { it.pos }.thenBy { it.id })
+        val others = rest.filter { !it.chip }
+            .sortedWith(compareByDescending<Link> { scores[it.id] ?: 0.0 }.thenBy { it.title.lowercase() }.thenBy { it.id })
+        return head + chips + others
+    }
+
+    const val FIND_LABEL = "Find…"
+    const val HINT_PEOPLE = "Add people in Customize"
+    const val HINT_PLACES = "Add places in Customize"
+
+    /**
+     * The chips for the current step. Where / who: every candidate ([candidates]: [places] and
+     * [people] are every link of that kind), then a hint when there are none at all, then
+     * "🔍 Find…" always last. Feeling: [moods] (active, by level) with names when two share a
+     * level, as in the 📝 box.
      */
     fun options(
         state: FlowState,
@@ -340,30 +383,44 @@ object CheckInFlow {
         scores: Map<Long, Double>,
         face: (Mood) -> String,
     ): List<FlowOption> = when (state.step) {
-        FlowStep.WHERE -> rank(places, scores, listOfNotNull(state.defaultPlace))
-            .map { FlowOption(it.id, it.emoji, it.title, it.id == state.place) }
-        FlowStep.WHO -> rank(people, scores, state.defaultPeople)
-            .map { FlowOption(it.id, it.emoji, it.title, it.id in state.people) }
+        FlowStep.WHERE -> linkOptions(candidates(places, scores, listOfNotNull(state.defaultPlace)), HINT_PLACES) { it == state.place }
+        FlowStep.WHO -> linkOptions(candidates(people, scores, state.defaultPeople), HINT_PEOPLE) { it in state.people }
         FlowStep.FEELING -> {
             val active = moods.filter { !it.archived }.sortedWith(compareBy({ it.level }, { it.pos }))
             val named = active.groupBy { it.level }.any { it.value.size > 1 }
-            active.map { FlowOption(it.id, face(it), if (named) it.name else "", false) }
+            active.map { FlowOption(it.id, face(it), if (named) it.name else "", false, OptionType.MOOD) }
         }
     }
 
-    /** The first [max] options, except that chosen ones past it take the places of the last unchosen. */
+    private fun linkOptions(ls: List<Link>, hint: String, on: (Long) -> Boolean): List<FlowOption> {
+        val out = ls.map { FlowOption(it.id, it.emoji, it.title, on(it.id)) }.toMutableList()
+        if (out.isEmpty()) out.add(FlowOption(0, "", hint, false, OptionType.HINT))
+        out.add(FlowOption(0, "🔍", FIND_LABEL, false, OptionType.FIND))
+        return out
+    }
+
+    private fun special(o: FlowOption) = o.type == OptionType.FIND || o.type == OptionType.HINT
+
+    /**
+     * What fits in [max] cells: the first chips, except that chosen ones past it take the places of
+     * the last unchosen; the hint and "Find…" stay at the end. With a single cell, a chip beats
+     * Find (the panel has it).
+     */
     fun window(options: List<FlowOption>, max: Int): List<FlowOption> {
         if (max <= 0) return emptyList()
-        if (options.size <= max) return options
-        val shown = options.take(max).toMutableList()
-        val missing = options.drop(max).filter { it.on }
-        for (m in missing) {
+        val specials = options.filter { special(it) }
+        val regular = options.filter { !special(it) }
+        val room = if (regular.isNotEmpty() && max <= specials.size) max else max - specials.size
+        if (room <= 0) return specials.takeLast(max)
+        val shown = if (regular.size <= room) regular.toMutableList() else regular.take(room).toMutableList()
+        regular.drop(room).filter { it.on }.forEach { m ->
             val drop = shown.indexOfLast { !it.on }
-            if (drop < 0) break
-            shown.removeAt(drop)
-            shown.add(m)
+            if (drop >= 0) {
+                shown.removeAt(drop)
+                shown.add(m)
+            }
         }
-        return shown
+        return if (regular.isNotEmpty() && max <= specials.size) shown else shown + specials
     }
 
     fun head(state: FlowState, actName: String): String = "$actName · ${state.step.question}"
@@ -371,47 +428,42 @@ object CheckInFlow {
     fun stepLine(state: FlowState): List<Pair<FlowStep, Boolean>> = state.steps.map { it to (it == state.step) }
 
     /** The 1×1: "📍 Loft?" accepts the default; the question opens the panel. */
-    fun tile(state: FlowState, options: List<FlowOption>): FlowTile = when (state.step) {
-        FlowStep.WHERE -> {
-            val p = options.firstOrNull { it.on }
-            val chip = if (p == null) "📍 Nowhere?" else (p.emoji.ifBlank { "📍" } + " " + p.label + "?")
-            FlowTile(state.step.question, chip, FlowControl.NEXT)
+    fun tile(state: FlowState, options: List<FlowOption>): FlowTile {
+        val links = options.filter { it.type == OptionType.LINK }
+        return when (state.step) {
+            FlowStep.WHERE -> {
+                val p = links.firstOrNull { it.on }
+                val chip = if (p == null) "📍 Nowhere?" else (p.emoji.ifBlank { "📍" } + " " + p.label + "?")
+                FlowTile(state.step.question, chip, FlowControl.NEXT)
+            }
+            FlowStep.WHO -> {
+                val on = links.filter { it.on }.map { it.label }
+                FlowTile(state.step.question, if (on.isEmpty()) "👥 No one?" else "👥 " + on.joinToString(", ") + "?", FlowControl.NEXT)
+            }
+            FlowStep.FEELING -> FlowTile(state.step.question, "Skip", FlowControl.SKIP)
         }
-        FlowStep.WHO -> {
-            val on = options.filter { it.on }.map { it.label }
-            FlowTile(state.step.question, if (on.isEmpty()) "👥 No one?" else "👥 " + on.joinToString(", ") + "?", FlowControl.NEXT)
-        }
-        FlowStep.FEELING -> FlowTile(state.step.question, "Skip", FlowControl.SKIP)
     }
 
     /**
-     * A one-row strip: two rows of [cols] cells. The first row is chips; the second is more chips
-     * then the controls at the end (as many as fit: at least two cells are kept for them).
+     * A one-row strip: [rows] rows of [cols] chips; the controls go in their own column
+     * ([column]), so they're full height and easy to hit.
      */
-    fun strip(state: FlowState, actName: String, options: List<FlowOption>, cols: Int): FlowView {
+    fun strip(state: FlowState, actName: String, options: List<FlowOption>, cols: Int, rows: Int): FlowView {
         val c = maxOf(1, cols)
-        val ctl = controls(state.step, minOf(c, controls(state.step).size))
-        val secondRow = maxOf(0, c - ctl.size)
-        val shown = window(options, c + secondRow)
-        val row1 = shown.take(c).map { FlowCell(option = it) }
-        val row2 = shown.drop(c).map { FlowCell(option = it) }
-        val rows = listOf(
-            pad(row1, c),
-            pad(row2, secondRow) + ctl.map { FlowCell(control = it) },
-        )
-        return FlowView(state.step, head(state, actName), rows, stepLine(state))
+        val shown = window(options, c * maxOf(1, rows))
+        val chipRows = shown.chunked(c).map { pad(it.map { o -> FlowCell(o) }, c) }
+        return FlowView(state.step, head(state, actName), chipRows, stepLine(state), controls(state.step))
     }
 
     /**
      * Two rows or taller (and the panel): rows of [cols] chips, as many rows as they need up to
-     * [rows], then a row of the controls, with the step line above.
+     * [rows], then the controls as one full-width row, with the step line above.
      */
     fun block(state: FlowState, actName: String, options: List<FlowOption>, cols: Int, rows: Int): FlowView {
         val c = maxOf(1, cols)
         val shown = window(options, c * maxOf(1, rows))
-        val optionRows = shown.chunked(c).map { pad(it.map { o -> FlowCell(option = o) }, c) }
-        val ctl = controls(state.step).map { FlowCell(control = it) }
-        return FlowView(state.step, head(state, actName), optionRows + listOf(ctl), stepLine(state))
+        val optionRows = shown.chunked(c).map { pad(it.map { o -> FlowCell(o) }, c) }
+        return FlowView(state.step, head(state, actName), optionRows, stepLine(state), controls(state.step))
     }
 
     private fun pad(cells: List<FlowCell>, n: Int): List<FlowCell> =

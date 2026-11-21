@@ -88,4 +88,44 @@
         android:layout_height="match_parent"
         android:layout_weight="1"
         android:orientation="vertical" />
+
+    <!-- The check-in flow's controls, full height at the right edge: Next big on top, the other
+         one or two side by side below. The renderer sets the width; hidden outside the flow. -->
+    <LinearLayout
+        android:id="@+id/flow_controls"
+        android:layout_width="72dp"
+        android:layout_height="match_parent"
+        android:layout_marginStart="2dp"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/flow_top"
+            style="@style/FlowButton"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:textSize="14sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/flow_bottom1"
+                style="@style/FlowButton"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/flow_bottom2"
+                style="@style/FlowButton"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1" />
+        </LinearLayout>
+    </LinearLayout>
 </LinearLayout>

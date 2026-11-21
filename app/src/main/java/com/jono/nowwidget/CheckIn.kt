@@ -34,8 +34,13 @@ object CheckIn {
         )
     }
 
-    /** The links that can be chips on the widget. */
-    fun chipLinks(links: List<Link>, kind: String): List<Link> = links.filter { it.kind == kind && !it.archived && it.chip }
+    /**
+     * Every person or place the flow can offer (removed ones aren't): the chips first, then the
+     * vault's notes you haven't used yet ([CheckInFlow.candidates] orders them). Most of his
+     * people come from the vault and only become chips once used, so limiting the flow to chips
+     * would leave WHO empty.
+     */
+    fun flowLinks(links: List<Link>, kind: String): List<Link> = links.filter { it.kind == kind && !it.archived }
 
     /** A switch to entry [entryId] happened: start the flow (or end any old one when it's all off). */
     fun start(ctx: Context, entryId: Long) {
@@ -46,14 +51,15 @@ object CheckIn {
             return
         }
         val links = Store.allLinks(ctx)
-        val places = chipLinks(links, LinkKind.PLACE)
-        val people = chipLinks(links, LinkKind.PERSON)
+        val places = flowLinks(links, LinkKind.PLACE)
+        val people = flowLinks(links, LinkKind.PERSON)
         val e = flowEntry(cur, links) ?: return
         val defaultPlace = CheckInFlow.defaultPlace(e.place, Store.lastPlaceBefore(ctx, cur), places.map { it.id }.toSet())
         val defaultPeople = CheckInFlow.defaultPeople(e.people, Store.previousPeople(ctx, cur), people.map { it.id }.toSet())
+        // Where and who always ask, even with nothing to show yet: "Find…" and a hint are there.
         val available = setOfNotNull(
-            FlowStep.WHERE.takeIf { places.isNotEmpty() },
-            FlowStep.WHO.takeIf { people.isNotEmpty() },
+            FlowStep.WHERE,
+            FlowStep.WHO,
             FlowStep.FEELING.takeIf { Store.allMoods(ctx).any { !it.archived } },
         )
         val st = CheckInFlow.start(e, Prefs.flowSettings(ctx), defaultPlace, defaultPeople, now, available)

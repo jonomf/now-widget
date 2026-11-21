@@ -31,23 +31,39 @@
             android:gravity="center_horizontal"
             android:textSize="11sp" />
 
-        <!-- The check-in flow: the step's default ("📍 Loft?"). Tap to accept it. -->
-        <TextView
-            android:id="@+id/flow_chip"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="3dp"
-            android:background="@drawable/slot_on"
-            android:ellipsize="end"
-            android:includeFontPadding="false"
-            android:paddingStart="6dp"
-            android:paddingTop="4dp"
-            android:paddingEnd="6dp"
-            android:paddingBottom="4dp"
-            android:singleLine="true"
-            android:textColor="@color/widget_text"
-            android:textSize="11sp"
-            android:visibility="gone" />
+    </LinearLayout>
+
+    <!-- The check-in flow: the whole lower half accepts the step's default ("📍 Loft?"); the top
+         half is still the head (opens the panel with the whole step). Hidden outside the flow. -->
+    <LinearLayout
+        android:id="@+id/flow_hit"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <LinearLayout
+            android:id="@+id/flow_hit_area"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="3dp">
+
+            <TextView
+                android:id="@+id/flow_chip"
+                style="@style/FlowButton"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@drawable/slot_on"
+                android:textSize="12sp" />
+        </LinearLayout>
     </LinearLayout>
 
     <TextView

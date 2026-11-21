@@ -244,22 +244,83 @@ class CheckInFlowTest {
     private fun opts(st: FlowState, scores: Map<Long, Double> = emptyMap()) =
         CheckInFlow.options(st, places, people, moods, scores) { it.emoji }
 
+    private fun links(o: List<FlowOption>) = o.filter { it.type == OptionType.LINK }
+
     @Test
     fun optionsPerStep() {
         val st = started(place = 3)
         val where = opts(st, mapOf(2L to 5.0))
-        assertEquals(listOf(3L, 2L, 1L), where.map { it.id })
-        assertEquals(listOf(true, false, false), where.map { it.on })
+        assertEquals(listOf(3L, 2L, 1L), links(where).map { it.id })
+        assertEquals(listOf(true, false, false), links(where).map { it.on })
         val who = opts(st.copy(step = FlowStep.WHO, people = setOf(10, 12)), mapOf(12L to 1.0))
-        assertEquals(listOf(10L, 12L, 11L), who.map { it.id })
-        assertEquals(listOf(true, true, false), who.map { it.on })
+        assertEquals(listOf(10L, 12L, 11L), links(who).map { it.id })
+        assertEquals(listOf(true, true, false), links(who).map { it.on })
         val faces = opts(st.copy(step = FlowStep.FEELING))
         assertEquals(listOf(5L, 4L, 3L, 2L, 1L), faces.map { it.id }) // by level, archived left out
-        assertTrue(faces.all { it.label.isEmpty() })
+        assertTrue(faces.all { it.label.isEmpty() && it.type == OptionType.MOOD })
         // Two moods on one level: every face gets its name.
         val named = CheckInFlow.options(st.copy(step = FlowStep.FEELING), places, people,
             moods + Mood(7, "calm", 3, "😌", 6, false), emptyMap()) { it.emoji }
         assertEquals("rad", named.last().label)
+    }
+
+    @Test
+    fun findIsAlwaysLastOnWhereAndWho() {
+        val st = started(place = 3)
+        for (o in listOf(opts(st), opts(st.copy(step = FlowStep.WHO)))) {
+            assertEquals(OptionType.FIND, o.last().type)
+            assertEquals(1, o.count { it.type == OptionType.FIND })
+            assertEquals(0, o.count { it.type == OptionType.HINT })
+        }
+        assertTrue(opts(st.copy(step = FlowStep.FEELING)).none { it.type == OptionType.FIND })
+        // Windowed to any size, Find stays last; with one cell a real chip wins.
+        val o = opts(st)
+        assertEquals(OptionType.FIND, CheckInFlow.window(o, 2).last().type)
+        assertEquals(listOf(3L), CheckInFlow.window(o, 1).map { it.id })
+        val strip = CheckInFlow.strip(st, "Hobby", o, 3, 2)
+        assertEquals(OptionType.FIND, strip.rows.flatten().last { !it.filler }.option!!.type)
+    }
+
+    @Test
+    fun noChipsStillAsksWithFindAndAHint() {
+        // His people come from the vault and aren't chips until used: they're still offered,
+        // after the chips, by name.
+        val vault = listOf(
+            Link(20, "Zed", LinkKind.PERSON, "", 0, false, fromVault = true),
+            Link(21, "amy", LinkKind.PERSON, "", 1, false, fromVault = true),
+            Link(22, "Gone", LinkKind.PERSON, "", 2, true, fromVault = true),
+        )
+        assertTrue(vault.none { it.chip })
+        val st = CheckInFlow.start(entry, FlowSettings(), null, emptyList(), now)!!
+        assertEquals(listOf(FlowStep.WHERE, FlowStep.WHO, FlowStep.FEELING), st.steps)
+        val who = CheckInFlow.options(st.copy(step = FlowStep.WHO), emptyList(), people + vault, moods, emptyMap()) { it.emoji }
+        assertEquals(listOf(10L, 11L, 12L, 21L, 20L), links(who).map { it.id }) // chips, then vault a–z, removed left out
+        // None at all: the hint, then Find.
+        val none = CheckInFlow.options(st, emptyList(), emptyList(), moods, emptyMap()) { it.emoji }
+        assertEquals(listOf(OptionType.HINT, OptionType.FIND), none.map { it.type })
+        assertEquals(CheckInFlow.HINT_PLACES, none[0].label)
+        val nobody = CheckInFlow.options(st.copy(step = FlowStep.WHO), emptyList(), emptyList(), moods, emptyMap()) { it.emoji }
+        assertEquals(CheckInFlow.HINT_PEOPLE, nobody[0].label)
+        // The step's controls are still there.
+        assertEquals(listOf(FlowControl.SKIP, FlowControl.NEXT, FlowControl.DONE), CheckInFlow.block(st, "Hobby", none, 3, 2).controls)
+    }
+
+    @Test
+    fun aFoundPersonIsAddedAndBecomesAChip() {
+        val found = Link(30, "Dulce", LinkKind.PERSON, "", 9, false, fromVault = true)
+        assertFalse(found.chip)
+        val st = started().copy(step = FlowStep.WHO)
+        val e = entry.copy(place = 1, people = setOf(10))
+        // A pick from Find is a chip tap: added to the selection, and (keeping defaults) saved.
+        val r = CheckInFlow.tap(st, e, FlowTap.Pick(30), now, FlowStep.WHO)
+        assertEquals(setOf(10L, 30L), r.state!!.people)
+        assertEquals(listOf(FlowEffect.SetPeople(50, setOf(10L, 30L))), r.effects)
+        // Chosen, it's shown even at the back of a long list.
+        val many = (100L..140L).map { person(it, "P$it") }
+        val o = CheckInFlow.options(r.state!!, places, people + many + found, moods, emptyMap()) { it.emoji }
+        assertTrue(CheckInFlow.window(o, 6).any { it.id == 30L && it.on })
+        // Saved on an entry, it's used, so it's a chip from then on.
+        assertTrue(found.copy(uses = 1).chip)
     }
 
     @Test
@@ -275,8 +336,12 @@ class CheckInFlowTest {
         assertEquals(listOf(FlowControl.SKIP, FlowControl.NEXT, FlowControl.DONE), CheckInFlow.controls(FlowStep.WHERE))
         assertEquals(listOf(FlowControl.NONE, FlowControl.NEXT, FlowControl.DONE), CheckInFlow.controls(FlowStep.WHO))
         assertEquals(listOf(FlowControl.SKIP, FlowControl.NOTE), CheckInFlow.controls(FlowStep.FEELING))
-        assertEquals(listOf(FlowControl.SKIP, FlowControl.DONE), CheckInFlow.controls(FlowStep.WHERE, 2))
-        assertEquals(listOf(FlowControl.NEXT, FlowControl.DONE), CheckInFlow.controls(FlowStep.WHO, 2))
+        assertEquals(FlowColumn(FlowControl.NEXT, listOf(FlowControl.SKIP, FlowControl.DONE)), CheckInFlow.column(FlowStep.WHERE))
+        assertEquals(FlowColumn(FlowControl.NEXT, listOf(FlowControl.NONE, FlowControl.DONE)), CheckInFlow.column(FlowStep.WHO))
+        assertEquals(FlowColumn(FlowControl.SKIP, listOf(FlowControl.NOTE)), CheckInFlow.column(FlowStep.FEELING))
+        assertTrue(CheckInFlow.primary(FlowControl.NEXT))
+        assertFalse(CheckInFlow.primary(FlowControl.SKIP))
+        assertFalse(CheckInFlow.primary(FlowControl.DONE))
         val st = started()
         assertTrue(CheckInFlow.onLockScreen(st))
         assertTrue(CheckInFlow.onLockScreen(st.copy(step = FlowStep.WHO)))
@@ -305,29 +370,23 @@ class CheckInFlowTest {
     @Test
     fun stripSizes() {
         val st = started(place = 1)
-        val many = (1L..20L).map { FlowOption(it, "", "p$it", it == 1L) }
-        // 3×1 (4 columns): 4 chips, then 1 chip and Skip / Next / Done.
-        val v = CheckInFlow.strip(st, "Hobby", many, 4)
+        val many = (1L..20L).map { FlowOption(it, "", "p$it", it == 1L) } + FlowOption(0, "🔍", "Find…", false, OptionType.FIND)
+        // STRIP (2 × 2 chips): the chips only; the controls are the column.
+        val v = CheckInFlow.strip(st, "Hobby", many, 2, 2)
         assertEquals("Hobby · where?", v.head)
-        assertEquals(2, v.rows.size)
-        assertTrue(v.rows.all { it.size == 4 })
-        assertEquals(listOf(1L, 2L, 3L, 4L), v.rows[0].map { it.option!!.id })
-        assertEquals(5L, v.rows[1][0].option!!.id)
-        assertEquals(listOf(FlowControl.SKIP, FlowControl.NEXT, FlowControl.DONE), v.rows[1].drop(1).map { it.control })
-        // 2×1 (2 columns): two chips; the two controls that matter most.
-        val s = CheckInFlow.strip(st, "Hobby", many, 2)
-        assertEquals(listOf(1L, 2L), s.rows[0].map { it.option!!.id })
-        assertEquals(listOf(FlowControl.SKIP, FlowControl.DONE), s.rows[1].map { it.control })
-        // 4×1 with few chips: fillers keep the columns, controls stay at the end.
-        val f = CheckInFlow.strip(st, "Hobby", many.take(2), 6)
-        assertEquals(6, f.rows[0].size)
-        assertEquals(2, f.rows[0].count { !it.filler })
-        assertTrue(f.rows[1].take(3).all { it.filler })
-        // Feeling: five faces and Skip / 📝 at 3×1.
-        val faces = (1L..5L).map { FlowOption(it, "😐", "", false) }
-        val fe = CheckInFlow.strip(st.copy(step = FlowStep.FEELING), "Hobby", faces, 4)
-        assertEquals(listOf(FlowControl.SKIP, FlowControl.NOTE), fe.rows[1].mapNotNull { it.control })
-        assertEquals(5, fe.rows.flatten().count { it.option != null })
+        assertEquals(listOf(listOf(1L, 2L), listOf(3L, 0L)), v.rows.map { r -> r.map { it.option!!.id } })
+        assertEquals(OptionType.FIND, v.rows[1][1].option!!.type)
+        // STRIP_S (one row, one chip): the default; Find is in the panel.
+        val s = CheckInFlow.strip(st, "Hobby", many, 1, 1)
+        assertEquals(listOf(listOf(1L)), s.rows.map { r -> r.map { it.option!!.id } })
+        // Few chips: fillers keep the columns.
+        val f = CheckInFlow.strip(st, "Hobby", many.take(2), 3, 2)
+        assertEquals(1, f.rows.size)
+        assertEquals(1, f.rows[0].count { it.filler })
+        // Feeling: five faces in STRIP_L's 3 × 2.
+        val faces = (1L..5L).map { FlowOption(it, "😐", "", false, OptionType.MOOD) }
+        val fe = CheckInFlow.strip(st.copy(step = FlowStep.FEELING), "Hobby", faces, 3, 2)
+        assertEquals(5, fe.rows.flatten().count { !it.filler })
         assertEquals(listOf(FlowStep.WHERE to false, FlowStep.WHO to false, FlowStep.FEELING to true), fe.steps)
     }
 
@@ -335,17 +394,17 @@ class CheckInFlowTest {
     fun blockSizes() {
         val st = started(place = 1).copy(step = FlowStep.WHO)
         val many = (1L..20L).map { FlowOption(it, "", "p$it", false) }
-        // 2×2 (3 columns, 2 rows): 6 chips, then the controls row.
+        // 2×2 (3 columns, 2 rows): 6 chips, and the controls as their own full-width row.
         val v = CheckInFlow.block(st, "Hobby", many, 3, 2)
-        assertEquals(3, v.rows.size)
-        assertEquals(listOf(FlowControl.NONE, FlowControl.NEXT, FlowControl.DONE), v.rows.last().map { it.control })
-        assertEquals(6, v.rows.dropLast(1).flatten().count { it.option != null })
+        assertEquals(2, v.rows.size)
+        assertEquals(listOf(FlowControl.NONE, FlowControl.NEXT, FlowControl.DONE), v.controls)
+        assertEquals(6, v.rows.flatten().count { !it.filler })
         assertEquals(listOf(FlowStep.WHERE to false, FlowStep.WHO to true, FlowStep.FEELING to false), v.steps)
         // Only as many chip rows as needed.
         val few = CheckInFlow.block(st, "Hobby", many.take(4), 7, 4)
-        assertEquals(2, few.rows.size)
+        assertEquals(1, few.rows.size)
         assertEquals(7, few.rows[0].size)
         // No chips at all: just the controls.
-        assertEquals(1, CheckInFlow.block(st, "Hobby", emptyList(), 3, 2).rows.size)
+        assertTrue(CheckInFlow.block(st, "Hobby", emptyList(), 3, 2).rows.isEmpty())
     }
 }

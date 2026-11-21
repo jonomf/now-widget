@@ -1,9 +1,13 @@
 package com.jono.nowwidget
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import android.view.Gravity
 import android.widget.FrameLayout
+import com.jono.nowwidget.core.FlowStep
+import com.jono.nowwidget.core.FlowTap
+import com.jono.nowwidget.core.LinkKind
 import kotlin.math.min
 
 /**
@@ -16,6 +20,8 @@ class PanelActivity : Activity() {
     private var openedOn: Long? = null
     /** The flow showed here: when it ends, the panel's job is done. */
     private var flowSeen = false
+    /** "🔍 Find…" was tapped for this step: open the picker once the panel shows. */
+    private var pendingFind: String? = null
     private val redraw: () -> Unit = { runOnUiThread { onChanged() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -29,13 +35,45 @@ class PanelActivity : Activity() {
         card = FrameLayout(this).apply { isClickable = true } // taps inside don't close it
         root.addView(card, FrameLayout.LayoutParams(width, height, Gravity.CENTER))
         setContentView(root)
+        if (savedInstanceState == null) pendingFind = intent?.getStringExtra(EXTRA_FIND)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingFind = intent.getStringExtra(EXTRA_FIND)
     }
 
     override fun onResume() {
         super.onResume()
         openedOn = Store.current(this)?.activityId
         WidgetRenderer.listeners.add(redraw)
-        if (!render()) finish()
+        if (!render()) {
+            finish()
+            return
+        }
+        val find = pendingFind
+        pendingFind = null
+        if (find != null) find(find)
+    }
+
+    /**
+     * The flow's "🔍 Find…": the type-ahead picker over every person or place (vault notes and
+     * aliases too). A pick is the same as tapping its chip (a place is chosen and the flow moves
+     * on; a person joins the selection), and once it's on an entry it's a chip from then on.
+     */
+    private fun find(stepName: String) {
+        val step = FlowStep.values().firstOrNull { it.name == stepName } ?: return
+        val kind = when (step) {
+            FlowStep.WHERE -> LinkKind.PLACE
+            FlowStep.WHO -> LinkKind.PERSON
+            FlowStep.FEELING -> return
+        }
+        val title = if (kind == LinkKind.PLACE) "Where are you?" else "Who are you with?"
+        pickLink(title, pickKinds(kind), kind) { id ->
+            CheckIn.tap(this, FlowTap.Pick(id), step)
+            WidgetRenderer.refresh(this) // redraws this panel too
+        }
     }
 
     override fun onPause() {
@@ -64,6 +102,10 @@ class PanelActivity : Activity() {
         if (s.flow == null && flowSeen) return false
         show(s)
         return true
+    }
+
+    companion object {
+        const val EXTRA_FIND = "find"
     }
 
     private fun show(s: Snapshot) {

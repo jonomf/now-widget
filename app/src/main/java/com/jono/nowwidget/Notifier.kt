@@ -84,10 +84,11 @@ object Notifier {
     private fun flowCollapsed(ctx: Context, s: Snapshot, flow: FlowState): RemoteViews {
         val rv = RemoteViews(ctx.packageName, R.layout.notif_collapsed)
         val n = maxOf(2, Prefs.lockButtons(ctx))
-        val cells = CheckInFlow.window(s.flowOptions, n - 1).map { FlowCell(option = it) } + FlowCell(control = FlowControl.NEXT)
-        // notif_collapsed is itself the row.
+        val cells = CheckInFlow.window(s.flowOptions, n - 1).map { FlowCell(it) }
+        // notif_collapsed is itself the row: the chips, then Next as a real button.
         rv.removeAllViews(R.id.row)
         WidgetRenderer.flowRow(ctx, rv, R.id.row, R.layout.slot, flow.step, cells)
+        rv.addView(R.id.row, WidgetRenderer.flowButton(ctx, flow.step, FlowControl.NEXT))
         return rv
     }
 
