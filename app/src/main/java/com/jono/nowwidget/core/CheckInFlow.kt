@@ -260,7 +260,11 @@ object CheckInFlow {
                 else -> Result(s, emptyList())
             }
             FlowStep.WHO -> when (tap) {
-                is FlowTap.Pick -> Result(s.copy(people = if (tap.id in s.people) s.people - tap.id else s.people + tap.id), emptyList())
+                is FlowTap.Pick -> {
+                    val people = if (tap.id in s.people) s.people - tap.id else s.people + tap.id
+                    // Keeping defaults: each toggle is saved, so walking away keeps it. Off: only Next saves.
+                    Result(s.copy(people = people), if (s.applied) listOfNotNull(peopleEffect(entry, people)) else emptyList())
+                }
                 FlowTap.Next -> advance(s, listOfNotNull(peopleEffect(entry, s.people)))
                 FlowTap.None -> advance(s.copy(people = emptySet()), listOfNotNull(peopleEffect(entry, emptySet())))
                 FlowTap.Done -> Result(null, listOfNotNull(peopleEffect(entry, s.people)))

@@ -123,18 +123,25 @@ class CheckInFlowTest {
     fun whoStep() {
         val st = started().copy(step = FlowStep.WHO)
         val e = entry.copy(place = 1, people = setOf(10))
+        // Keeping defaults (on): every toggle is saved to the entry right away.
         val t1 = CheckInFlow.tap(st, e, FlowTap.Pick(11), now)
         assertEquals(setOf(10L, 11L), t1.state!!.people)
         assertEquals(FlowStep.WHO, t1.state!!.step)
-        assertTrue(t1.effects.isEmpty())
-        val t2 = CheckInFlow.tap(t1.state, e, FlowTap.Pick(10), now)
+        assertEquals(listOf(FlowEffect.SetPeople(50, setOf(10L, 11L))), t1.effects)
+        val e1 = e.copy(people = setOf(10, 11))
+        val t2 = CheckInFlow.tap(t1.state, e1, FlowTap.Pick(10), now)
         assertEquals(setOf(11L), t2.state!!.people)
+        assertEquals(listOf(FlowEffect.SetPeople(50, setOf(11L))), t2.effects)
         // The defaults keep their place at the front, whatever is chosen.
         assertEquals(listOf(10L), t2.state!!.defaultPeople)
 
-        val next = CheckInFlow.tap(t2.state, e, FlowTap.Next, now)
+        // Next has nothing left to write once the toggles are saved.
+        val e2 = e.copy(people = setOf(11))
+        val next = CheckInFlow.tap(t2.state, e2, FlowTap.Next, now)
         assertEquals(FlowStep.FEELING, next.state!!.step)
-        assertEquals(listOf(FlowEffect.SetPeople(50, setOf(11L))), next.effects)
+        assertTrue(next.effects.isEmpty())
+        // Walking away after toggling: the entry already has the edit; the timed-out flow writes nothing.
+        assertNull(CheckInFlow.tap(t2.state, e2, FlowTap.Next, t2.state!!.deadline).state)
 
         val none = CheckInFlow.tap(st, e, FlowTap.None, now)
         assertEquals(FlowStep.FEELING, none.state!!.step)
@@ -143,6 +150,20 @@ class CheckInFlowTest {
         val done = CheckInFlow.tap(t1.state, e, FlowTap.Done, now)
         assertNull(done.state)
         assertEquals(listOf(FlowEffect.SetPeople(50, setOf(10L, 11L))), done.effects)
+    }
+
+    @Test
+    fun whoStepWithoutKeepingDefaultsSavesOnlyOnNext() {
+        val st = started(FlowSettings(keepDefaults = false)).copy(step = FlowStep.WHO)
+        val t1 = CheckInFlow.tap(st, entry, FlowTap.Pick(11), now)
+        assertEquals(setOf(10L, 11L), t1.state!!.people)
+        assertTrue(t1.effects.isEmpty())
+        val t2 = CheckInFlow.tap(t1.state, entry, FlowTap.Pick(10), now)
+        assertTrue(t2.effects.isEmpty())
+        val next = CheckInFlow.tap(t2.state, entry, FlowTap.Next, now)
+        assertEquals(listOf(FlowEffect.SetPeople(50, setOf(11L))), next.effects)
+        // Walking away: nothing was written.
+        assertTrue(CheckInFlow.tap(t2.state, entry, FlowTap.Next, t2.state!!.deadline).effects.isEmpty())
     }
 
     @Test
