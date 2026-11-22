@@ -29,6 +29,12 @@ object StoreSql {
     /** Check-in flow ranking: every link use since a time, leaving one entry out (since, entry id). */
     const val LINK_USES_SINCE = "SELECT el.link_id, e.start_ms FROM entry_link el JOIN entry e ON e.id = el.entry_id WHERE e.start_ms >= ? AND e.id <> ?"
 
+    /** Free-written titles, newest first, with their category (for suggestions and categories). */
+    const val TITLES_RECENT = "SELECT title, start_ms, activity_id, id FROM entry WHERE title IS NOT NULL AND title <> '' ORDER BY start_ms DESC, id DESC LIMIT 2000"
+
+    /** "Make this an activity": the entries of one title go to the new activity, as plain entries (activity, id). */
+    const val ENTRY_TO_ACTIVITY = "UPDATE entry SET activity_id = ?, title = NULL WHERE id = ?"
+
     /** Import dedupe: the note of the moment with this key, if any. */
     const val NOTE_AT_KEY = "SELECT text FROM moment WHERE source_key = ? LIMIT 1"
     const val KEY_TAKEN = "SELECT 1 FROM moment WHERE source_key = ? LIMIT 1"

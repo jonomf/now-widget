@@ -65,6 +65,16 @@
             android:taskAffinity=""
             android:theme="@style/Panel" />
 
+        <!-- The activity buttons' ＋: say what you're doing in your own words. -->
+        <activity
+            android:name=".FreeWriteActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/Panel"
+            android:windowSoftInputMode="stateAlwaysVisible|adjustResize" />
+
         <!-- Lets the Widget Updater find this app and tell it when a new build is out. -->
         <receiver
             android:name=".UpdateStatusReceiver"

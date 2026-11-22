@@ -234,7 +234,7 @@ class MainActivity : Activity() {
         obsidian.refresh()
         calendar.refresh()
         nowLine.text = s.act?.let { a ->
-            a.emoji + " " + a.name + "  " + Fmt.dur(s.now - (s.cur?.start ?: s.now))
+            a.emoji + " " + s.name + (if (s.cur?.title != null) " (" + a.name + ")" else "") + "  " + Fmt.dur(s.now - (s.cur?.start ?: s.now))
         } ?: "Nothing right now"
         val step = Prefs.stepMinutes(this)
         stepButton.text = "Tapping the current one again: " + if (step == 0) "turn it off" else "back $step min"
@@ -287,9 +287,17 @@ class MainActivity : Activity() {
         val groupColor = HashMap<String, Int>()
         val byPerson = HashMap<Long, Long>()
         val byPlace = HashMap<Long, Long>()
+        // Free-written titles, under their category (activity), as first written.
+        val byTitle = HashMap<Long, LinkedHashMap<String, Pair<String, Long>>>()
         spans.forEach { s ->
             val a = acts[s.entry.activityId]
             byAct[s.entry.activityId] = (byAct[s.entry.activityId] ?: 0L) + s.ms
+            s.entry.title?.let { t ->
+                val m = byTitle.getOrPut(s.entry.activityId) { LinkedHashMap() }
+                val k = t.lowercase()
+                val have = m[k]
+                m[k] = (have?.first ?: t) to ((have?.second ?: 0L) + s.ms)
+            }
             val g = a?.group?.ifBlank { "Ungrouped" } ?: "Ungrouped"
             byGroup[g] = (byGroup[g] ?: 0L) + s.ms
             if (a != null && g !in groupColor) groupColor[g] = a.color
@@ -308,6 +316,9 @@ class MainActivity : Activity() {
         byAct.entries.sortedByDescending { it.value }.forEach { (id, ms) ->
             val a = acts[id]
             stats.addView(statRow(if (a != null) a.emoji + " " + a.name else "Removed", ms, total, a?.color ?: GREY))
+            byTitle[id]?.values?.sortedByDescending { it.second }?.forEach { (t, tms) ->
+                stats.addView(statRow("      ✏️ $t", tms, total, a?.color ?: GREY))
+            }
         }
         if (byGroup.size > 1) {
             stats.addView(subheading("Groups"))
@@ -440,7 +451,8 @@ class MainActivity : Activity() {
             val e = m.entryId
             if (e != null && m.text.isNotBlank()) texts.getOrPut(e) { ArrayList() }.add(m.text)
         }
-        val sb = StringBuilder("start,end,minutes,activity,group,people,note,place\n")
+        // title (free-written words) is last, so readers of the older columns are unaffected; activity is its category.
+        val sb = StringBuilder("start,end,minutes,activity,group,people,note,place,title\n")
         Store.spans(this, 0L, System.currentTimeMillis()).forEach { s ->
             val a = acts[s.entry.activityId]
             val linked = s.entry.links.mapNotNull { links[it] }
@@ -450,6 +462,7 @@ class MainActivity : Activity() {
                 linked.filter { it.kind == LinkKind.PERSON }.joinToString("; ") { it.title },
                 texts[s.entry.id].orEmpty().joinToString("\n"),
                 linked.filter { it.kind == LinkKind.PLACE }.joinToString("; ") { it.title },
+                s.entry.title ?: "",
             )
             sb.append(Csv.line(fields)).append('\n')
         }
@@ -468,7 +481,7 @@ class MainActivity : Activity() {
         val refs = Store.refsFor(this)
         val entries = Store.spans(this, 0L, Long.MAX_VALUE).associateBy { it.entry.id }
         val f = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
-        val sb = StringBuilder("time,kind,mood,level,feelings,title,text,activity,people,place,context,also\n")
+        val sb = StringBuilder("time,kind,mood,level,feelings,title,text,activity,people,place,context,also,doing\n")
         Store.moments(this, 0L, Long.MAX_VALUE).forEach { m ->
             val mood = m.moodId?.let { moods[it] }
             val e = m.entryId?.let { entries[it]?.entry }
@@ -489,6 +502,7 @@ class MainActivity : Activity() {
                 linked.filter { it.kind == LinkKind.PLACE }.joinToString("; ") { it.title },
                 e?.contextId?.let { links[it]?.title } ?: "",
                 also.joinToString("; "),
+                e?.title ?: "",
             )
             sb.append(Csv.line(fields)).append('\n')
         }

@@ -20,8 +20,9 @@ class PanelActivity : Activity() {
     private var openedOn: Long? = null
     /** The flow showed here: when it ends, the panel's job is done. */
     private var flowSeen = false
-    /** "🔍 Find…" was tapped for this step: open the picker once the panel shows. */
+    /** A ＋ was tapped: the flow step's or the link kind's picker opens once the panel shows. */
     private var pendingFind: String? = null
+    private var pendingAdd: String? = null
     private val redraw: () -> Unit = { runOnUiThread { onChanged() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -35,13 +36,17 @@ class PanelActivity : Activity() {
         card = FrameLayout(this).apply { isClickable = true } // taps inside don't close it
         root.addView(card, FrameLayout.LayoutParams(width, height, Gravity.CENTER))
         setContentView(root)
-        if (savedInstanceState == null) pendingFind = intent?.getStringExtra(EXTRA_FIND)
+        if (savedInstanceState == null) {
+            pendingFind = intent?.getStringExtra(EXTRA_FIND)
+            pendingAdd = intent?.getStringExtra(EXTRA_ADD)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         pendingFind = intent.getStringExtra(EXTRA_FIND)
+        pendingAdd = intent.getStringExtra(EXTRA_ADD)
     }
 
     override fun onResume() {
@@ -53,12 +58,31 @@ class PanelActivity : Activity() {
             return
         }
         val find = pendingFind
+        val add = pendingAdd
         pendingFind = null
-        if (find != null) find(find)
+        pendingAdd = null
+        if (find != null) find(find) else if (add != null) add(add)
     }
 
     /**
-     * The flow's "🔍 Find…": the type-ahead picker over every person or place (vault notes and
+     * A people / places / contexts row's ＋: find any one (vault notes and aliases too) or add a
+     * new name, and put it on what you're doing now: a person joins, a place or context replaces.
+     */
+    private fun add(kind: String) {
+        if (kind !in LinkKind.ALL) return
+        pickLink("Find or add a " + kindName(kind), pickKinds(kind), kind) { id ->
+            val cur = Store.current(this) ?: return@pickLink
+            when (kind) {
+                LinkKind.PERSON -> if (id !in cur.links) Store.toggleLink(this, id)
+                LinkKind.PLACE -> Store.setPlace(this, cur.id, id)
+                else -> Store.setContext(this, cur.id, id)
+            }
+            WidgetRenderer.refresh(this)
+        }
+    }
+
+    /**
+     * The flow's "＋": the type-ahead picker over every person or place (vault notes and
      * aliases too). A pick is the same as tapping its chip (a place is chosen and the flow moves
      * on; a person joins the selection), and once it's on an entry it's a chip from then on.
      */
@@ -105,7 +129,10 @@ class PanelActivity : Activity() {
     }
 
     companion object {
+        /** A flow step's name: its ＋ was tapped. */
         const val EXTRA_FIND = "find"
+        /** A link kind: a people / places / contexts row's ＋ was tapped. */
+        const val EXTRA_ADD = "add"
     }
 
     private fun show(s: Snapshot) {

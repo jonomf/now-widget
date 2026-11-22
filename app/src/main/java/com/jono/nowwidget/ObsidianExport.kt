@@ -249,6 +249,7 @@ object ObsidianExport {
                 places = linked.filter { it.kind == LinkKind.PLACE }.map { it.title },
                 context = s.entry.contextId?.let { lk.links[it]?.title },
                 running = isToday && lk.runningId == s.entry.id,
+                title = s.entry.title,
             )
         }
         val dayMoments = moments.map { mo ->

@@ -107,6 +107,18 @@ class LogRulesTest {
     }
 
     @Test
+    fun aFreeWrittenEntryIsNotItsCategorysButton() {
+        val titled = Entry(2, 6, now - 10 * m, title = "fixing the bike")
+        // Tapping its category's button switches to the plain activity; it doesn't turn it off.
+        assertEquals(LogRules.Tap.Start(6, now), LogRules.tap(titled, false, null, 6, now, 0))
+        assertEquals(LogRules.Tap.Start(IDLE, now), LogRules.tap(titled.copy(title = null), false, null, 6, now, 0))
+        // A mistaken switch away from a titled entry doesn't drop back to it as if it were the button.
+        val prev = Entry(1, 5, now - 10 * m, title = "tax forms")
+        val mistake = Entry(3, 7, now - 20_000L)
+        assertEquals(LogRules.Tap.Replace(mistake.start), LogRules.tap(mistake, false, prev, 5, now, 0))
+    }
+
+    @Test
     fun contextIsStickyButNotForIdle() {
         assertEquals(4L, LogRules.contextForNew(7, 4L))
         assertEquals(null, LogRules.contextForNew(IDLE, 4L))

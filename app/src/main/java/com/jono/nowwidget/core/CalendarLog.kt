@@ -128,11 +128,11 @@ object CalendarDay {
         return keyOfLine(markers[0])
     }
 
-    /** `🎨 Hobby · Sam, Dulce @ Tartine`: people and place when there are any, kept short. */
+    /** `🎨 Hobby · Sam, Dulce @ Tartine` (a free-written title in place of the activity): people and place when there are any, kept short. */
     fun title(s: DaySpan): String {
         val sb = StringBuilder()
         if (s.emoji.isNotBlank()) sb.append(s.emoji.trim()).append(' ')
-        sb.append(s.activity.trim())
+        sb.append(s.label.trim())
         val people = s.people.map { it.trim() }.filter { it.isNotEmpty() }
         if (people.isNotEmpty()) {
             sb.append(" · ").append(people.take(MAX_PEOPLE).joinToString(", "))

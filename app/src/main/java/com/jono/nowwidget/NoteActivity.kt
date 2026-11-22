@@ -12,6 +12,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.jono.nowwidget.core.CheckInNav
 import com.jono.nowwidget.core.DiaryDay
+import com.jono.nowwidget.core.FreeWrite
 import com.jono.nowwidget.core.LinkKind
 import com.jono.nowwidget.core.Moment
 
@@ -127,7 +128,7 @@ class NoteActivity : Activity() {
         updateUi()
 
         val b = AlertDialog.Builder(this)
-            .setTitle("📝 " + (act?.let { it.emoji + " " + it.name } ?: "Check in"))
+            .setTitle("📝 " + (act?.let { it.emoji + " " + FreeWrite.name(cur?.title, it) } ?: "Check in"))
             .setView(outer)
             .setPositiveButton("Save", null)
             .setNegativeButton("Cancel", null)

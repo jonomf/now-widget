@@ -20,6 +20,7 @@ import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.Entry
 import com.jono.nowwidget.core.FeelingTag
 import com.jono.nowwidget.core.FlowSettings
+import com.jono.nowwidget.core.FreeWrite
 import com.jono.nowwidget.core.IDLE
 import com.jono.nowwidget.core.KeywordRule
 import com.jono.nowwidget.core.PlannedNudge
@@ -95,6 +96,7 @@ private class Helper(ctx: Context) : SQLiteOpenHelper(ctx, "now.db", null, Schem
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) Schema.upgradeFrom1().forEach { db.execSQL(it) }
         if (oldVersion < 3) Schema.upgradeFrom2().forEach { db.execSQL(it) }
+        if (oldVersion < 4) Schema.upgradeFrom3().forEach { db.execSQL(it) }
     }
 }
 
@@ -424,9 +426,12 @@ object Store {
     /** When you turned everything off; null if something is on. */
     fun idleSince(ctx: Context): Long? = latest(ctx)?.takeIf { it.activityId == IDLE }?.start
 
-    private const val ENTRY_COLS = "id, activity_id, start_ms, context_id"
+    private const val ENTRY_COLS = "id, activity_id, start_ms, context_id, title"
 
-    private fun readEntry(c: Cursor) = Entry(c.getLong(0), c.getLong(1), c.getLong(2), contextId = c.longOrNull(3))
+    private fun readEntry(c: Cursor) = Entry(
+        c.getLong(0), c.getLong(1), c.getLong(2), contextId = c.longOrNull(3),
+        title = if (c.isNull(4)) null else FreeWrite.clean(c.getString(4)),
+    )
 
     private fun latest(ctx: Context): Entry? {
         val e = db(ctx).rawQuery(
@@ -443,11 +448,13 @@ object Store {
             args(e.start, e.start, e.id),
         ).use { c -> if (c.moveToFirst()) readEntry(c) else null }
 
-    private fun insert(ctx: Context, activityId: Long, start: Long, contextId: Long? = null): Long {
+    private fun insert(ctx: Context, activityId: Long, start: Long, contextId: Long? = null, title: String? = null): Long {
+        val t = FreeWrite.clean(title)
         val id = db(ctx).insertOrThrow("entry", null, ContentValues().apply {
             put("activity_id", activityId)
             put("start_ms", start)
             if (contextId != null) put("context_id", contextId) else putNull("context_id")
+            if (t != null) put("title", t) else putNull("title")
         })
         dirtyAround(ctx, start)
         return id
@@ -503,6 +510,75 @@ object Store {
                 }
             }
         }
+    }
+
+    // --- Free-written activities (the rules are in core/FreeWrite.kt) ---
+
+    /** Every free-written title, newest first, with its category. */
+    fun titleUses(ctx: Context): List<FreeWrite.Used> {
+        val out = ArrayList<FreeWrite.Used>()
+        db(ctx).rawQuery(StoreSql.TITLES_RECENT, null).use { c ->
+            while (c.moveToNext()) out.add(FreeWrite.Used(c.getString(0), c.getLong(1), c.getLong(2)))
+        }
+        return out
+    }
+
+    /** The built-in "✏️ Other": an activity called Other if there is one, else a new one off the buttons. */
+    fun otherActivity(ctx: Context): Long {
+        allActs(ctx).firstOrNull { !it.archived && it.name.trim().equals(FreeWrite.OTHER_NAME, ignoreCase = true) }?.let { return it.id }
+        return saveAct(ctx, null, FreeWrite.OTHER_NAME, FreeWrite.OTHER_EMOJI, PALETTE[PALETTE.size - 1], "", show = false)
+    }
+
+    /**
+     * The quick box's Go: switch to what he typed. Just an activity's name is that activity's
+     * button. Anything else starts a new entry with the words as its title and a category chosen
+     * by [FreeWrite.category]. Returns the new entry's id (that starts the check-in flow), or null
+     * when nothing changed (it's what's on already).
+     */
+    fun startTitled(ctx: Context, text: String): Long? {
+        val t = FreeWrite.clean(text) ?: return null
+        val acts = allActs(ctx)
+        val cur = latest(ctx)?.takeIf { it.activityId != IDLE }
+        FreeWrite.exactActivity(t, acts)?.let { a ->
+            if (cur != null && cur.activityId == a.id && cur.title == null) return null
+            return tap(ctx, a.id)
+        }
+        if (cur != null && FreeWrite.same(cur.title, t)) return null
+        val uses = titleUses(ctx)
+        val cat = FreeWrite.category(t, acts, FreeWrite.lastActivityFor(t, uses), Prefs.calRules(ctx), NO_OTHER)
+            .let { if (it == NO_OTHER) otherActivity(ctx) else it }
+        lastTapAct = -1L
+        return insert(ctx, cat, System.currentTimeMillis(), LogRules.contextForNew(cat, lastContext(ctx)), t)
+    }
+
+    private const val NO_OTHER = -1L
+
+    /** How many entries have this title (any case). */
+    fun titleCount(ctx: Context, title: String): Int = titleUses(ctx).count { FreeWrite.same(it.title, title) }
+
+    /**
+     * "Make this an activity": a new activity named [title] in [like]'s group, with its emoji and
+     * color, on the buttons; every entry with that title becomes a plain entry of it. Returns its id.
+     */
+    fun makeActivity(ctx: Context, title: String, like: Act?): Long {
+        val t = FreeWrite.clean(title) ?: return like?.id ?: otherActivity(ctx)
+        val starts = ArrayList<Long>()
+        val id = tx(ctx) { d ->
+            val newId = saveAct(ctx, null, t, like?.emoji ?: "", like?.color ?: PALETTE[0], like?.group ?: "", show = true)
+            val ids = ArrayList<Long>()
+            d.rawQuery("SELECT id, start_ms, title FROM entry WHERE title IS NOT NULL", null).use { c ->
+                while (c.moveToNext()) {
+                    if (FreeWrite.same(c.getString(2), t)) {
+                        ids.add(c.getLong(0))
+                        starts.add(c.getLong(1))
+                    }
+                }
+            }
+            ids.forEach { d.execSQL(StoreSql.ENTRY_TO_ACTIVITY, arrayOf<Any>(newId, it)) }
+            newId
+        }
+        starts.distinctBy { DiaryDay.start(it) }.forEach { dirtyAround(ctx, it) }
+        return id
     }
 
     // --- The check-in flow's reads (the rules are in core/CheckInFlow.kt) ---
@@ -625,20 +701,23 @@ object Store {
         startOf(ctx, entryId)?.let { dirtyAround(ctx, it) }
     }
 
-    fun addEntry(ctx: Context, activityId: Long, start: Long, links: Set<Long>, contextId: Long?) {
+    fun addEntry(ctx: Context, activityId: Long, start: Long, links: Set<Long>, contextId: Long?, title: String? = null) {
         tx(ctx) {
-            val id = insert(ctx, activityId, start, contextId)
+            val id = insert(ctx, activityId, start, contextId, title)
             writeLinks(ctx, id, links)
         }
     }
 
-    fun updateEntry(ctx: Context, id: Long, activityId: Long, start: Long, links: Set<Long>, contextId: Long?) {
+    /** [title] null or blank makes it a plain entry of its activity again. Marks every export dirty, like any edit. */
+    fun updateEntry(ctx: Context, id: Long, activityId: Long, start: Long, links: Set<Long>, contextId: Long?, title: String? = null) {
         tx(ctx) { d ->
             val old = startOf(ctx, id)
+            val t = FreeWrite.clean(title)
             val v = ContentValues().apply {
                 put("activity_id", activityId)
                 put("start_ms", start)
                 if (contextId != null) put("context_id", contextId) else putNull("context_id")
+                if (t != null) put("title", t) else putNull("title")
             }
             d.update("entry", v, "id=?", args(id))
             writeLinks(ctx, id, links)

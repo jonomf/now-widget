@@ -268,17 +268,18 @@ class CheckInFlowTest {
     fun findIsAlwaysLastOnWhereAndWho() {
         val st = started(place = 3)
         for (o in listOf(opts(st), opts(st.copy(step = FlowStep.WHO)))) {
-            assertEquals(OptionType.FIND, o.last().type)
-            assertEquals(1, o.count { it.type == OptionType.FIND })
+            assertEquals(OptionType.PLUS, o.last().type)
+            assertEquals(1, o.count { it.type == OptionType.PLUS })
             assertEquals(0, o.count { it.type == OptionType.HINT })
         }
-        assertTrue(opts(st.copy(step = FlowStep.FEELING)).none { it.type == OptionType.FIND })
-        // Windowed to any size, Find stays last; with one cell a real chip wins.
+        assertTrue(opts(st.copy(step = FlowStep.FEELING)).none { it.type == OptionType.PLUS })
+        // Windowed to any size, ＋ stays last; with no room it takes the last cell, never dropped.
         val o = opts(st)
-        assertEquals(OptionType.FIND, CheckInFlow.window(o, 2).last().type)
-        assertEquals(listOf(3L), CheckInFlow.window(o, 1).map { it.id })
+        assertEquals(listOf(OptionType.LINK, OptionType.PLUS), CheckInFlow.window(o, 2).map { it.type })
+        assertEquals(listOf(OptionType.PLUS), CheckInFlow.window(o, 1).map { it.type })
+        assertTrue(CheckInFlow.window(o, 0).isEmpty())
         val strip = CheckInFlow.strip(st, "Hobby", o, 3, 2)
-        assertEquals(OptionType.FIND, strip.rows.flatten().last { !it.filler }.option!!.type)
+        assertEquals(OptionType.PLUS, strip.rows.flatten().last { !it.filler }.option!!.type)
     }
 
     @Test
@@ -297,7 +298,7 @@ class CheckInFlowTest {
         assertEquals(listOf(10L, 11L, 12L, 21L, 20L), links(who).map { it.id }) // chips, then vault a–z, removed left out
         // None at all: the hint, then Find.
         val none = CheckInFlow.options(st, emptyList(), emptyList(), moods, emptyMap()) { it.emoji }
-        assertEquals(listOf(OptionType.HINT, OptionType.FIND), none.map { it.type })
+        assertEquals(listOf(OptionType.HINT, OptionType.PLUS), none.map { it.type })
         assertEquals(CheckInFlow.HINT_PLACES, none[0].label)
         val nobody = CheckInFlow.options(st.copy(step = FlowStep.WHO), emptyList(), emptyList(), moods, emptyMap()) { it.emoji }
         assertEquals(CheckInFlow.HINT_PEOPLE, nobody[0].label)
@@ -321,6 +322,17 @@ class CheckInFlowTest {
         assertTrue(CheckInFlow.window(o, 6).any { it.id == 30L && it.on })
         // Saved on an entry, it's used, so it's a chip from then on.
         assertTrue(found.copy(uses = 1).chip)
+    }
+
+    @Test
+    fun plusIsLastInEveryChipList() {
+        // Activity buttons and link rows: as many items as fit before ＋; ＋ takes the last cell when they don't.
+        assertEquals(3, CheckInFlow.itemsBeforePlus(10, 4)) // 2×1: three buttons and ＋
+        assertEquals(2, CheckInFlow.itemsBeforePlus(2, 4))  // room to spare: ＋ right after them
+        assertEquals(0, CheckInFlow.itemsBeforePlus(5, 1))  // one cell: just ＋
+        assertEquals(0, CheckInFlow.itemsBeforePlus(0, 6))
+        assertEquals(0, CheckInFlow.itemsBeforePlus(5, 0))
+        assertEquals(27, CheckInFlow.itemsBeforePlus(Int.MAX_VALUE, 28)) // 4×4: 27 buttons and ＋
     }
 
     @Test
@@ -370,15 +382,18 @@ class CheckInFlowTest {
     @Test
     fun stripSizes() {
         val st = started(place = 1)
-        val many = (1L..20L).map { FlowOption(it, "", "p$it", it == 1L) } + FlowOption(0, "🔍", "Find…", false, OptionType.FIND)
+        val many = (1L..20L).map { FlowOption(it, "", "p$it", it == 1L) } + FlowOption(0, "＋", "More", false, OptionType.PLUS)
         // STRIP (2 × 2 chips): the chips only; the controls are the column.
         val v = CheckInFlow.strip(st, "Hobby", many, 2, 2)
         assertEquals("Hobby · where?", v.head)
         assertEquals(listOf(listOf(1L, 2L), listOf(3L, 0L)), v.rows.map { r -> r.map { it.option!!.id } })
-        assertEquals(OptionType.FIND, v.rows[1][1].option!!.type)
-        // STRIP_S (one row, one chip): the default; Find is in the panel.
-        val s = CheckInFlow.strip(st, "Hobby", many, 1, 1)
-        assertEquals(listOf(listOf(1L)), s.rows.map { r -> r.map { it.option!!.id } })
+        assertEquals(OptionType.PLUS, v.rows[1][1].option!!.type)
+        // STRIP_S (one row of two): the default, then ＋.
+        val s = CheckInFlow.strip(st, "Hobby", many, 2, 1)
+        assertEquals(listOf(listOf(1L, 0L)), s.rows.map { r -> r.map { it.option!!.id } })
+        assertEquals(OptionType.PLUS, s.rows[0][1].option!!.type)
+        // A single cell: ＋ replaces the chip.
+        assertEquals(OptionType.PLUS, CheckInFlow.strip(st, "Hobby", many, 1, 1).rows[0][0].option!!.type)
         // Few chips: fillers keep the columns.
         val f = CheckInFlow.strip(st, "Hobby", many.take(2), 3, 2)
         assertEquals(1, f.rows.size)

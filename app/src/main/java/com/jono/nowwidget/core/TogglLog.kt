@@ -120,9 +120,12 @@ object TogglDay {
         return listOf(feeling, note).filter { it.isNotEmpty() }.joinToString(" — ").ifEmpty { null }
     }
 
-    /** `🎨 Hobby`, then ` — ` and the moments' words joined with ` / `, kept under [MAX_DESCRIPTION]. */
+    /**
+     * `🎨 Hobby` (or the free-written title: `✏️ fixing the bike`; the project stays the category),
+     * then ` — ` and the moments' words joined with ` / `, kept under [MAX_DESCRIPTION].
+     */
     fun description(s: DaySpan, moments: List<DayMoment>, notes: Boolean, checkIns: Boolean): String {
-        val head = (s.emoji.trim() + " " + s.activity.trim()).trim()
+        val head = (s.emoji.trim() + " " + s.label.trim()).trim()
         val parts = moments.sortedBy { it.ts }.mapNotNull { momentPart(it, notes, checkIns) }
         val text = if (parts.isEmpty()) head else head + " — " + parts.joinToString(" / ")
         return truncate(text, MAX_DESCRIPTION)

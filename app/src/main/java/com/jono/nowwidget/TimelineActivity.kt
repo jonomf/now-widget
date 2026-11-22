@@ -11,6 +11,7 @@ import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
@@ -22,6 +23,7 @@ import com.jono.nowwidget.core.PlannedVsActual
 import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.Entry
 import com.jono.nowwidget.core.FeelingTag
+import com.jono.nowwidget.core.FreeWrite
 import com.jono.nowwidget.core.LinkKind
 import com.jono.nowwidget.core.Moment
 import com.jono.nowwidget.core.Mood
@@ -303,6 +305,8 @@ class TimelineActivity : Activity() {
         val where = linked.filter { it.kind == LinkKind.PLACE }.joinToString(", ") { "at " + it.title }
         val context = s.entry.contextId?.let { links[it]?.title }?.let { "in $it" } ?: ""
         val details = listOf(
+            // A free-written title's category, first.
+            if (s.entry.title != null) a?.name ?: "" else "",
             Fmt.time(this, s.from) + "–" + Fmt.time(this, s.to),
             Fmt.dur(s.ms),
             who,
@@ -314,7 +318,7 @@ class TimelineActivity : Activity() {
             setPadding(0, dp(10), 0, dp(4))
             setOnClickListener { edit(s.entry) }
             addView(TextView(this@TimelineActivity).apply {
-                text = if (a != null) a.emoji + " " + a.name else "Removed"
+                text = if (a != null) a.emoji + " " + FreeWrite.name(s.entry.title, a) else FreeWrite.name(s.entry.title, null)
                 textSize = 16f
             })
             addView(TextView(this@TimelineActivity).apply {
@@ -385,6 +389,32 @@ class TimelineActivity : Activity() {
             if (at >= 0) setSelection(at)
         }
         box.addView(spinner)
+
+        // Free-written words: what it was, with the activity above as its category. Clear it to make
+        // this a plain entry of that activity again.
+        box.addView(label("Title (your own words; optional)"))
+        val titleField = EditText(this).apply {
+            hint = "e.g. fixing the bike"
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setText(entry?.title ?: "")
+        }
+        box.addView(titleField)
+        val oldTitle = entry?.title
+        var shown: AlertDialog? = null
+        if (oldTitle != null && Store.titleCount(this, oldTitle) >= FreeWrite.MAKE_ACTIVITY_AT) {
+            box.addView(Button(this).apply {
+                text = "Make \"$oldTitle\" an activity"
+                setOnClickListener {
+                    val like = acts.firstOrNull { it.id == entry.activityId }
+                    Store.makeActivity(this@TimelineActivity, oldTitle, like)
+                    // The box shows the old title and category: close it, so Save can't put them back.
+                    shown?.dismiss()
+                    Toast.makeText(this@TimelineActivity, "\"$oldTitle\" is an activity now, with a button", Toast.LENGTH_SHORT).show()
+                    changed()
+                }
+            })
+        }
 
         val timeButton = Button(this).apply { text = "Started " + Fmt.time(this@TimelineActivity, start) }
         timeButton.setOnClickListener {
@@ -458,10 +488,11 @@ class TimelineActivity : Activity() {
                 val act = acts[spinner.selectedItemPosition].id
                 val chosen = checks.filter { it.second.isChecked }.map { it.first }.toSet()
                 val ctxId = contextItems.getOrNull(contextSpinner.selectedItemPosition - 1)?.id
+                val title = FreeWrite.clean(titleField.text.toString())
                 if (entry == null) {
-                    Store.addEntry(this, act, start, chosen, ctxId)
+                    Store.addEntry(this, act, start, chosen, ctxId, title)
                 } else {
-                    Store.updateEntry(this, entry.id, act, start, chosen, ctxId)
+                    Store.updateEntry(this, entry.id, act, start, chosen, ctxId, title)
                 }
                 changed()
             }
@@ -471,7 +502,7 @@ class TimelineActivity : Activity() {
                 changed()
             }
         }
-        b.show()
+        shown = b.show()
     }
 
     private fun editMoment(m: Moment) {

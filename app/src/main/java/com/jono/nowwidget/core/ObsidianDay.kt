@@ -19,7 +19,12 @@ data class DaySpan(
     val context: String? = null,
     /** Still going: it has no end time yet. */
     val running: Boolean = false,
-)
+    /** Free-written words ("fixing the bike"); [activity] is then its category. */
+    val title: String? = null,
+) {
+    /** What it was: the free-written title, else the activity's name. */
+    val label: String get() = FreeWrite.clean(title) ?: activity
+}
 
 /** A note or feeling, attached to an entry or on its own. */
 data class DayMoment(
@@ -113,10 +118,17 @@ object ObsidianDay {
     class Merged(var span: DaySpan, val entries: MutableSet<Long>)
 
     private fun sameThings(a: DaySpan, b: DaySpan): Boolean =
-        a.activityId == b.activityId && a.people.toSet() == b.people.toSet() &&
+        a.activityId == b.activityId && sameTitle(a.title, b.title) && a.people.toSet() == b.people.toSet() &&
             a.places.toSet() == b.places.toSet() && a.context == b.context
 
-    /** Back-to-back spans of the same activity with the same links become one. Also used by the calendar export. */
+    /** Both plain, or the same free-written title (any case). */
+    private fun sameTitle(a: String?, b: String?): Boolean {
+        val x = FreeWrite.clean(a)
+        val y = FreeWrite.clean(b)
+        return if (x == null || y == null) x == y else x.equals(y, ignoreCase = true)
+    }
+
+    /** Back-to-back spans of the same activity, title and links become one. Also used by the calendar export. */
     fun merge(spans: List<DaySpan>): List<Merged> {
         val out = ArrayList<Merged>()
         spans.sortedBy { it.from }.forEach { s ->
@@ -209,7 +221,7 @@ object ObsidianDay {
             if (!s.running) sb.append(time(s.to, d.tz))
             sb.append(' ')
             if (s.emoji.isNotBlank()) sb.append(s.emoji.trim()).append(' ')
-            sb.append(s.activity)
+            sb.append(s.label)
             if (s.people.isNotEmpty()) sb.append(" w ").append(names(s.people.map { link(it, d.notes[it]) }))
             if (s.places.isNotEmpty()) sb.append(" at ").append(names(s.places.map { link(it, d.notes[it]) }))
             if (s.context != null && s.context != headContext) sb.append(" in ").append(link(s.context, d.notes[s.context]))

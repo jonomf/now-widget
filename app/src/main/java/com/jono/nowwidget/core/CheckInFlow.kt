@@ -138,8 +138,8 @@ enum class OptionType {
     LINK,
     /** A mood face (id = mood id). */
     MOOD,
-    /** "🔍 Find…": the type-ahead picker over every person or place, in the panel. */
-    FIND,
+    /** "＋": always the last chip; the type-ahead picker over every person or place (and add new), in the panel. */
+    PLUS,
     /** "Add people in Customize": there are none yet; opens the app. */
     HINT,
 }
@@ -365,14 +365,16 @@ object CheckInFlow {
         return head + chips + others
     }
 
-    const val FIND_LABEL = "Find…"
+    /** Every chip list ends with this, everywhere. */
+    const val PLUS = "＋"
+    const val PLUS_LABEL = "More"
     const val HINT_PEOPLE = "Add people in Customize"
     const val HINT_PLACES = "Add places in Customize"
 
     /**
      * The chips for the current step. Where / who: every candidate ([candidates]: [places] and
-     * [people] are every link of that kind), then a hint when there are none at all, then
-     * "🔍 Find…" always last. Feeling: [moods] (active, by level) with names when two share a
+     * [people] are every link of that kind), then a hint when there are none at all, then "＋"
+     * always last. Feeling: [moods] (active, by level) with names when two share a
      * level, as in the 📝 box.
      */
     fun options(
@@ -395,22 +397,22 @@ object CheckInFlow {
     private fun linkOptions(ls: List<Link>, hint: String, on: (Long) -> Boolean): List<FlowOption> {
         val out = ls.map { FlowOption(it.id, it.emoji, it.title, on(it.id)) }.toMutableList()
         if (out.isEmpty()) out.add(FlowOption(0, "", hint, false, OptionType.HINT))
-        out.add(FlowOption(0, "🔍", FIND_LABEL, false, OptionType.FIND))
+        out.add(FlowOption(0, PLUS, PLUS_LABEL, false, OptionType.PLUS))
         return out
     }
 
-    private fun special(o: FlowOption) = o.type == OptionType.FIND || o.type == OptionType.HINT
+    private fun special(o: FlowOption) = o.type == OptionType.PLUS || o.type == OptionType.HINT
 
     /**
      * What fits in [max] cells: the first chips, except that chosen ones past it take the places of
-     * the last unchosen; the hint and "Find…" stay at the end. With a single cell, a chip beats
-     * Find (the panel has it).
+     * the last unchosen; the hint and "＋" stay at the end. When there's no room, "＋" takes the
+     * last cell rather than being dropped (it's never dropped while there's a cell at all).
      */
     fun window(options: List<FlowOption>, max: Int): List<FlowOption> {
         if (max <= 0) return emptyList()
         val specials = options.filter { special(it) }
         val regular = options.filter { !special(it) }
-        val room = if (regular.isNotEmpty() && max <= specials.size) max else max - specials.size
+        val room = max - specials.size
         if (room <= 0) return specials.takeLast(max)
         val shown = if (regular.size <= room) regular.toMutableList() else regular.take(room).toMutableList()
         regular.drop(room).filter { it.on }.forEach { m ->
@@ -420,8 +422,14 @@ object CheckInFlow {
                 shown.add(m)
             }
         }
-        return if (regular.isNotEmpty() && max <= specials.size) shown else shown + specials
+        return shown + specials
     }
+
+    /**
+     * The ＋ rule for any chip list of [n] items in [cells] cells: how many items fit before ＋,
+     * which always takes the next cell, or the last one when they don't all fit.
+     */
+    fun itemsBeforePlus(n: Int, cells: Int): Int = if (cells <= 0) 0 else minOf(n, cells - 1)
 
     fun head(state: FlowState, actName: String): String = "$actName · ${state.step.question}"
 

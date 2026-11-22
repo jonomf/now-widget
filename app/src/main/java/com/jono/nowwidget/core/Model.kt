@@ -53,6 +53,8 @@ data class Entry(
     val start: Long,
     val links: Set<Long> = emptySet(),
     val contextId: Long? = null,
+    /** Free-written words ("fixing the bike"): what it was, with [activityId] as its category. Null: just the activity. */
+    val title: String? = null,
 )
 
 /** An entry clipped to the time range that was asked for. */

@@ -145,7 +145,7 @@ class CheckInForm(
                     a.setChipOn(v, t.id in tags)
                 })
             }
-        tagWrap.addView(a.chip("+", false) {
+        tagWrap.addView(a.chip("＋", false) {
             askName(a, "New feeling") { name ->
                 tags.add(Store.findOrAddTag(a, name))
                 drawTags()
@@ -183,7 +183,7 @@ class LinkRow(private val a: Activity, private val kind: String, title: String, 
                 draw()
             })
         }
-        wrap.addView(a.chip("+", false) {
+        wrap.addView(a.chip("＋", false) {
             a.pickLink("Find or add a " + kindName(kind), pickKinds(kind), kind) { id ->
                 selected = id
                 touched = true

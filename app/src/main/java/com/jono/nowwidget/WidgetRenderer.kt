@@ -27,6 +27,7 @@ import com.jono.nowwidget.core.FlowOption
 import com.jono.nowwidget.core.FlowState
 import com.jono.nowwidget.core.FlowStep
 import com.jono.nowwidget.core.FlowView
+import com.jono.nowwidget.core.FreeWrite
 import com.jono.nowwidget.core.OptionType
 import com.jono.nowwidget.core.Link
 import com.jono.nowwidget.core.LinkKind
@@ -62,6 +63,9 @@ class Snapshot(
     /** The current step's chips, best first (all of them; each size takes what fits). */
     val flowOptions: List<FlowOption> = emptyList(),
 ) {
+    /** What you're doing, by name: a free-written title, else the activity's name. */
+    val name: String get() = FreeWrite.name(cur?.title, act)
+
     /** The buttons for [n] slots: the usual picks, with the planned one first. */
     fun picks(n: Int): List<Act> = LogRules.withNudge(Store.picks(buttons, act, n, scores, smart), nudge, act, n)
 }
@@ -101,7 +105,7 @@ object WidgetRenderer {
     ) {
         TILE(R.layout.widget_tile, SizeF(50f, 50f), "now only", placeInHead = false),
         STRIP_S(R.layout.widget_strip, SizeF(150f, 50f), "now + 4 buttons", cols = 2, rows = 2, headDp = 96f,
-            placeInHead = false, flowHeadDp = 64f, flowCols = 1, flowRows = 1, flowCtlDp = 56f),
+            placeInHead = false, flowHeadDp = 56f, flowCols = 2, flowRows = 1, flowCtlDp = 56f),
         STRIP(R.layout.widget_strip, SizeF(220f, 50f), "now + 8 buttons", cols = 4, rows = 2, headDp = 108f,
             placeInHead = false, flowHeadDp = 84f, flowCols = 2, flowRows = 2, flowCtlDp = 68f),
         STRIP_L(R.layout.widget_strip, SizeF(320f, 50f), "now + 12 buttons", cols = 6, rows = 2, headDp = 122f,
@@ -230,7 +234,7 @@ object WidgetRenderer {
         val flow = s.flow
         if (flow != null) {
             // The whole step at full size: this is where the 1×1 and the small strips send you.
-            val view = CheckInFlow.block(flow, s.act?.name ?: "", s.flowOptions, PANEL_COLS, PANEL_ROWS)
+            val view = CheckInFlow.block(flow, s.name, s.flowOptions, PANEL_COLS, PANEL_ROWS)
             rv.setTextViewText(R.id.cur_name, view.head)
             clear(rv, R.id.people_inline)
             clear(rv, R.id.people_row)
@@ -308,7 +312,7 @@ object WidgetRenderer {
 
     /** A strip or block size while the flow runs: the head asks, the button area holds the step. */
     private fun fillFlow(ctx: Context, k: Kind, rv: RemoteViews, s: Snapshot, flow: FlowState, barBmp: Bitmap?) {
-        val name = s.act?.name ?: ""
+        val name = s.name
         if (k.layout == R.layout.widget_strip) {
             // Chips in the middle, the controls in their own full-height column at the right edge.
             val view = CheckInFlow.strip(flow, name, s.flowOptions, k.flowCols, k.flowRows)
@@ -429,7 +433,7 @@ object WidgetRenderer {
     private fun optionIntent(ctx: Context, step: FlowStep, o: FlowOption): PendingIntent = when (o.type) {
         OptionType.LINK -> NowWidget.flowIntent(ctx, step, "pick", o.id)
         OptionType.MOOD -> NowWidget.flowIntent(ctx, step, "mood", o.id)
-        OptionType.FIND -> openFind(ctx, step)
+        OptionType.PLUS -> openFind(ctx, step)
         OptionType.HINT -> openApp(ctx)
     }
 
@@ -437,7 +441,7 @@ object WidgetRenderer {
     fun controlIntent(ctx: Context, step: FlowStep, c: FlowControl): PendingIntent =
         if (c == FlowControl.NOTE) openNote(ctx, fromFlow = true) else NowWidget.flowIntent(ctx, step, c.key, 0)
 
-    /** "🔍 Find…": the panel, with the type-ahead picker for the step's kind open over it. */
+    /** The flow's "＋": the panel, with the type-ahead picker for the step's kind open over it. */
     private fun openFind(ctx: Context, step: FlowStep): PendingIntent = PendingIntent.getActivity(
         ctx, 6 + step.ordinal,
         Intent(ctx, PanelActivity::class.java)
@@ -461,7 +465,8 @@ object WidgetRenderer {
         rv.setInt(R.id.root, "setBackgroundResource",
             if (cur == null) R.drawable.widget_bg_idle else R.drawable.widget_bg)
         rv.setTextViewText(R.id.cur_emoji, act?.emoji ?: "⭕")
-        rv.setTextViewText(R.id.cur_name, act?.name ?: "Nothing")
+        // A free-written entry goes by its own words; its category's emoji stays beside them.
+        rv.setTextViewText(R.id.cur_name, if (cur == null) "Nothing" else s.name)
         val since = cur?.start ?: s.idleSince
         if (since != null) {
             rv.setViewVisibility(R.id.cur_elapsed, View.VISIBLE)
@@ -490,6 +495,8 @@ object WidgetRenderer {
     private fun sinceLine(s: Snapshot, withTotal: Boolean, withPlace: Boolean, withContext: Boolean): String {
         val cur: Entry = s.cur ?: return s.sinceText.ifBlank { "Tap a button to start" }
         val parts = ArrayList<String>()
+        // A free-written title's category, in the smaller line.
+        if (cur.title != null) s.act?.let { parts.add(it.name) }
         val names = s.people.filter { it.id in cur.links }.map { it.title }
         if (names.isNotEmpty()) parts.add(names.joinToString(", "))
         val place = s.place
@@ -540,10 +547,14 @@ object WidgetRenderer {
     ) {
         // Android can reapply an update onto the views already showing, so always clear first.
         rv.removeAllViews(container)
-        val picks = s.picks(cols * rows)
-        picks.chunked(cols).forEach { chunk ->
+        // ＋ is always the last button: after the activities, or in the last cell when they don't all fit.
+        val picks = s.picks(CheckInFlow.itemsBeforePlus(Int.MAX_VALUE, cols * rows))
+        val cells: List<Act?> = picks + listOf<Act?>(null)
+        cells.chunked(cols).forEach { chunk ->
             val row = RemoteViews(ctx.packageName, rowLayout)
-            chunk.forEach { a -> row.addView(R.id.row, slot(ctx, slotLayout, a, a.id == s.act?.id)) }
+            chunk.forEach { a ->
+                row.addView(R.id.row, if (a == null) plusSlot(ctx, slotLayout) else slot(ctx, slotLayout, a, a.id == s.act?.id))
+            }
             repeat(cols - chunk.size) {
                 val filler = RemoteViews(ctx.packageName, slotLayout)
                 filler.setViewVisibility(R.id.slot_root, View.INVISIBLE)
@@ -553,10 +564,26 @@ object WidgetRenderer {
         }
     }
 
+    /** The activity buttons' ＋: say what you're doing in your own words. */
+    private fun plusSlot(ctx: Context, layout: Int): RemoteViews {
+        val v = RemoteViews(ctx.packageName, layout)
+        v.setViewVisibility(R.id.slot_root, View.VISIBLE)
+        v.setTextViewText(R.id.slot_emoji, CheckInFlow.PLUS)
+        v.setViewVisibility(R.id.slot_emoji, View.VISIBLE)
+        v.setTextViewText(R.id.slot_label, "Write")
+        v.setViewVisibility(R.id.slot_label, View.VISIBLE)
+        v.setInt(R.id.slot_root, "setBackgroundResource", R.drawable.slot_off)
+        v.setOnClickPendingIntent(R.id.slot_root, openFreeWrite(ctx))
+        return v
+    }
+
     fun slot(ctx: Context, layout: Int, a: Act, on: Boolean): RemoteViews {
         val v = RemoteViews(ctx.packageName, layout)
+        v.setViewVisibility(R.id.slot_root, View.VISIBLE)
         v.setTextViewText(R.id.slot_emoji, a.emoji)
+        v.setViewVisibility(R.id.slot_emoji, View.VISIBLE)
         v.setTextViewText(R.id.slot_label, a.name)
+        v.setViewVisibility(R.id.slot_label, View.VISIBLE)
         v.setInt(R.id.slot_root, "setBackgroundResource", if (on) R.drawable.slot_on else R.drawable.slot_off)
         v.setOnClickPendingIntent(R.id.slot_root, NowWidget.tapIntent(ctx, a.id))
         return v
@@ -568,15 +595,15 @@ object WidgetRenderer {
     }
 
     fun people(ctx: Context, rv: RemoteViews, container: Int, s: Snapshot, max: Int, names: Boolean) =
-        chips(ctx, rv, container, s, s.people, max, names)
+        chips(ctx, rv, container, s, s.people, max, names, LinkKind.PERSON)
 
     /** Where you are: tap a place to say you're there, tap it again to clear. */
     private fun places(ctx: Context, rv: RemoteViews, container: Int, s: Snapshot, max: Int) =
-        chips(ctx, rv, container, s, s.places, max, names = true)
+        chips(ctx, rv, container, s, s.places, max, names = true, kind = LinkKind.PLACE)
 
     /** What this is part of (a trip, an event): tap to set it on what you're doing now, again to clear. */
     private fun contexts(ctx: Context, rv: RemoteViews, container: Int, s: Snapshot, max: Int) =
-        chips(ctx, rv, container, s, s.contexts, max, names = true) { l, cur -> l.id == cur.contextId }
+        chips(ctx, rv, container, s, s.contexts, max, names = true, kind = LinkKind.CONTEXT) { l, cur -> l.id == cur.contextId }
 
     private fun chips(
         ctx: Context,
@@ -586,17 +613,20 @@ object WidgetRenderer {
         items: List<Link>,
         max: Int,
         names: Boolean,
+        kind: String,
         isOn: (Link, Entry) -> Boolean = { l, cur -> l.id in cur.links },
     ) {
         rv.removeAllViews(container)
         val cur = s.cur
-        if (items.isEmpty() || cur == null || max <= 0) {
+        if (cur == null || max <= 0) {
             rv.setViewVisibility(container, View.GONE)
             return
         }
         rv.setViewVisibility(container, View.VISIBLE)
-        // The ones you've marked stay visible even if there are more than there's room for.
-        items.sortedByDescending { isOn(it, cur) }.take(max).forEach { p ->
+        // The ones you've marked stay visible even if there are more than there's room for; ＋ is
+        // always last and always fits (it takes the last place when they don't all fit).
+        val fit = CheckInFlow.itemsBeforePlus(items.size, max)
+        items.sortedByDescending { isOn(it, cur) }.take(fit).forEach { p ->
             val chip = RemoteViews(ctx.packageName, R.layout.chip)
             chip.setTextViewText(R.id.chip, if (names) p.label else p.badge)
             chip.setInt(R.id.chip, "setBackgroundResource",
@@ -604,6 +634,11 @@ object WidgetRenderer {
             chip.setOnClickPendingIntent(R.id.chip, NowWidget.linkIntent(ctx, p.id))
             rv.addView(container, chip)
         }
+        val plus = RemoteViews(ctx.packageName, R.layout.chip)
+        plus.setTextViewText(R.id.chip, CheckInFlow.PLUS)
+        plus.setInt(R.id.chip, "setBackgroundResource", R.drawable.slot_off)
+        plus.setOnClickPendingIntent(R.id.chip, openAdd(ctx, kind))
+        rv.addView(container, plus)
     }
 
     private fun breakdown(ctx: Context, rv: RemoteViews, s: Snapshot, lines: Int) {
@@ -631,6 +666,22 @@ object WidgetRenderer {
     private fun openPanel(ctx: Context): PendingIntent = PendingIntent.getActivity(
         ctx, 2,
         Intent(ctx, PanelActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    /** The activity buttons' ＋. */
+    private fun openFreeWrite(ctx: Context): PendingIntent = PendingIntent.getActivity(
+        ctx, 9,
+        Intent(ctx, FreeWriteActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    /** A people / places / contexts row's ＋: the panel with that kind's picker open. */
+    private fun openAdd(ctx: Context, kind: String): PendingIntent = PendingIntent.getActivity(
+        ctx, 10 + LinkKind.ALL.indexOf(kind),
+        Intent(ctx, PanelActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .putExtra(PanelActivity.EXTRA_ADD, kind),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 

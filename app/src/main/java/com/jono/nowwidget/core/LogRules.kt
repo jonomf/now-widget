@@ -107,7 +107,9 @@ object LogRules {
         if (latest == null) return Tap.Start(activityId, now)
         val fresh = now - latest.start < GRACE_MS && !latestHasMoments
         val isMarked = marked(latest, inheritedContextId, inheritedLinks)
-        if (latest.activityId == activityId) {
+        // A free-written entry ("fixing the bike", category Other) isn't its category's button: tapping
+        // that button is a switch to the plain activity, not "the same again".
+        if (latest.activityId == activityId && latest.title == null) {
             return when {
                 stepMinutes > 0 -> Tap.MoveBack(stepMinutes * 60_000L)
                 fresh && !isMarked -> Tap.Undo
@@ -116,7 +118,7 @@ object LogRules {
         }
         if (fresh) {
             // Only drop back to the entry before when nothing you added would be lost.
-            val keepGoing = before?.activityId == activityId && !isMarked
+            val keepGoing = before?.activityId == activityId && before.title == null && !isMarked
             return Tap.Replace(if (keepGoing) null else latest.start)
         }
         return Tap.Start(activityId, now)

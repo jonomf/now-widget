@@ -34,7 +34,7 @@ object Notifier {
         // Where and who may show here (their names already do); how you feel never does: on the
         // feeling step the notification is back to the usual buttons.
         val flow = s.flow?.takeIf { CheckInFlow.onLockScreen(it) }
-        val title = s.act?.let { a -> a.emoji + " " + (if (flow != null) CheckInFlow.head(flow, a.name) else a.name) }
+        val title = s.act?.let { a -> a.emoji + " " + (if (flow != null) CheckInFlow.head(flow, s.name) else s.name) }
             ?: "Nothing right now"
         val b = Notification.Builder(ctx, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat)

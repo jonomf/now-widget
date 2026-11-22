@@ -118,6 +118,18 @@ def test_flow_defaults_and_uses():
     check(len(uses) == 5, 'every use counts once')
 
 
+# --- Free-written titles ---
+
+def test_titles():
+    db = fresh_v2()
+    db.execute("INSERT INTO entry (id, activity_id, start_ms, title) VALUES (1, 5, 100, 'fixing the bike'), (2, 3, 200, NULL), (3, 5, 300, ''), (4, 4, 400, 'Fixing the bike')")
+    got = db.execute(SQL['TITLES_RECENT']).fetchall()
+    check(got == [('Fixing the bike', 400, 4, 4), ('fixing the bike', 100, 5, 1)], 'titles newest first, blanks and NULLs left out: %r' % got)
+    db.execute(SQL['ENTRY_TO_ACTIVITY'], (9, 4))
+    check(db.execute('SELECT activity_id, title FROM entry WHERE id = 4').fetchone() == (9, None), 'make an activity: entry moved, title cleared')
+    check(db.execute('SELECT activity_id, title FROM entry WHERE id = 1').fetchone() == (5, 'fixing the bike'), 'other entries untouched')
+
+
 # --- Daylio import ---
 
 PREDEF = {1: 'rad', 2: 'good', 3: 'meh', 4: 'bad', 5: 'awful'}
@@ -470,6 +482,7 @@ def main():
     test_delete_detaches()
     test_sticky_context()
     test_flow_defaults_and_uses()
+    test_titles()
     test_import()
     test_export_days()
     test_change_reach()
@@ -480,7 +493,7 @@ def main():
     test_alias_and_rename_sql()
     test_v2_links_stay_chips_after_a_scan()
     print(f'{len(failures)} failures' if failures else
-          f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; check-in flow defaults and uses; '
+          f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; check-in flow defaults and uses; free-written titles; '
           'import dedupe (re-import, same-minute notes, native feelings); rollback on failure; '
           'export dirty days, change counters and hashes; change reach; calendar and Toggl records by day; areas; vault cache; alias binding and rename; v2 links stay chips')
     sys.exit(1 if failures else 0)
