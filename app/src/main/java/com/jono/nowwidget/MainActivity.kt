@@ -161,7 +161,7 @@ class MainActivity : Activity() {
             WidgetRenderer.refresh(this)
         }
         col.addView(lockCountButton)
-        col.addView(note("This is a silent notification. Your current activity shows on the lock screen, so anyone holding your phone could see it. Expand it for more buttons and people. Moods, feelings and notes never show there."))
+        col.addView(note("This is a silent notification: no sound, buzz or pop-up. If it doesn't show on your lock screen, check that your phone isn't set to hide silent notifications there. Your current activity shows on the lock screen, so anyone holding your phone could see it. Expand it for more buttons and people. Moods, feelings and notes never show there."))
         col.addView(button("Open app info") {
             startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
         })

@@ -15,7 +15,9 @@ import com.jono.nowwidget.core.FlowState
  * without unlocking because they only send a broadcast to this app.
  */
 object Notifier {
-    private const val CHANNEL = "now_status"
+    private const val CHANNEL = "now_quiet"
+    /** The first channel was default importance; Android won't lower an existing channel. */
+    private const val OLD_CHANNEL = "now_status"
     private const val ID = 1
     private const val BIG_COLS = 5
     private const val BIG_ROWS = 3
@@ -42,6 +44,7 @@ object Notifier {
             .setSubText(title)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setSilent(true)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setCategory(Notification.CATEGORY_STATUS)
             .setContentIntent(WidgetRenderer.openApp(ctx))
@@ -60,10 +63,10 @@ object Notifier {
     }
 
     private fun ensureChannel(nm: NotificationManager) {
+        if (nm.getNotificationChannel(OLD_CHANNEL) != null) nm.deleteNotificationChannel(OLD_CHANNEL)
         if (nm.getNotificationChannel(CHANNEL) != null) return
-        // Default importance so it isn't hidden as "silent" on the lock screen, but with no sound
-        // or buzz, because it changes every time you tap.
-        val c = NotificationChannel(CHANNEL, "Lock screen buttons", NotificationManager.IMPORTANCE_DEFAULT)
+        // Silent: no sound, buzz or pop-up, ever. It changes every time you tap.
+        val c = NotificationChannel(CHANNEL, "Lock screen buttons", NotificationManager.IMPORTANCE_LOW)
         c.setSound(null, null)
         c.enableVibration(false)
         c.setShowBadge(false)
