@@ -140,8 +140,11 @@ object Store {
     private const val TOGGL_OLD = "toggl-old"
     private const val TOGGL_OLD_RELEASED = "toggl-old-released"
 
+    /** The Now hub's records (export_state) and dirty days (export_day). */
+    const val HUB = "hub"
+
     /** Every export target a change marks dirty: one place marks them all. */
-    private val TARGETS = listOf(OBSIDIAN, CALENDAR, TOGGL)
+    private val TARGETS = listOf(OBSIDIAN, CALENDAR, TOGGL, HUB)
 
     /** A change reaching further than this many diary days isn't marked past it; "Write all days" covers the rest. */
     private const val MAX_DIRTY_DAYS = 62
@@ -1336,6 +1339,7 @@ object Store {
         ObsidianExport.changed(ctx)
         CalendarExport.changed(ctx)
         TogglExport.changed(ctx)
+        HubSync.changed(ctx)
     }
 
     /** A change to one moment touches the diary day it sits in. */
@@ -1850,6 +1854,167 @@ object Store {
 
     fun picks(all: List<Act>, cur: Act?, n: Int, scores: Map<Long, Double>, smart: Boolean): List<Act> =
         LogRules.picks(all, cur, n, scores, smart)
+
+    // --- The Now hub (hub/PROTOCOL.md; the sync itself is in HubSync.kt) ---
+    //
+    // export_state, target 'hub': one row per record the hub knows about. local_key is the record's
+    // global id; remote_id is "<letter>:<local row id>:<diary day key>" (the day only for entries and
+    // moments); content_hash is the hash last sent or applied; synced_at holds its version.
+
+    /** What the sync remembers about one record. [localId] 0 and [hash] "-" for a deleted one. */
+    class HubRow(val gid: String, val letter: Char, val localId: Long, val day: String, val hash: String, val v: Long)
+
+    fun hubRows(ctx: Context): Map<String, HubRow> {
+        val out = HashMap<String, HubRow>()
+        db(ctx).rawQuery("SELECT local_key, remote_id, content_hash, synced_at FROM export_state WHERE target = ?", args(HUB)).use { c ->
+            while (c.moveToNext()) {
+                val parts = c.getString(1).split(':')
+                val letter = parts.getOrNull(0)?.firstOrNull() ?: continue
+                val local = parts.getOrNull(1)?.toLongOrNull() ?: continue
+                out[c.getString(0)] = HubRow(c.getString(0), letter, local, parts.getOrNull(2) ?: "", c.getString(2), c.getLong(3))
+            }
+        }
+        return out
+    }
+
+    fun saveHubRows(ctx: Context, rows: Collection<HubRow>) {
+        if (rows.isEmpty()) return
+        tx(ctx) { d ->
+            rows.forEach { r ->
+                d.execSQL(
+                    "INSERT OR REPLACE INTO export_state (target, local_key, remote_id, content_hash, synced_at) VALUES (?, ?, ?, ?, ?)",
+                    arrayOf<Any>(HUB, r.gid, "${r.letter}:${r.localId}:${r.day}", r.hash, r.v),
+                )
+            }
+        }
+    }
+
+    /** Forgets everything the sync knew (a different hub): the next run sends the whole log again. */
+    fun forgetHub(ctx: Context) {
+        tx(ctx) { d ->
+            d.execSQL("DELETE FROM export_state WHERE target = ?", arrayOf<Any>(HUB))
+            d.execSQL("DELETE FROM export_day WHERE target = ?", arrayOf<Any>(HUB))
+        }
+    }
+
+    /** Entries that start in [from, to), oldest first, with their links and extras. */
+    fun entriesStarting(ctx: Context, from: Long, to: Long): List<Entry> {
+        val rows = ArrayList<Entry>()
+        db(ctx).rawQuery("SELECT $ENTRY_COLS FROM entry WHERE start_ms >= ? AND start_ms < ? ORDER BY start_ms, id", args(from, to)).use { c ->
+            while (c.moveToNext()) rows.add(readEntry(c))
+        }
+        return withLinksAndExtras(ctx, rows)
+    }
+
+    fun entryById(ctx: Context, id: Long): Entry? {
+        val e = db(ctx).rawQuery("SELECT $ENTRY_COLS FROM entry WHERE id = ?", args(id)).use { c -> if (c.moveToFirst()) readEntry(c) else null }
+            ?: return null
+        return withLinksAndExtras(ctx, listOf(e)).first()
+    }
+
+    private fun withLinksAndExtras(ctx: Context, rows: List<Entry>): List<Entry> {
+        if (rows.isEmpty()) return rows
+        val ids = rows.map { it.id }
+        val links = HashMap<Long, Set<Long>>()
+        ids.chunked(500).forEach { links.putAll(linksFor(ctx, it)) }
+        val extras = extrasFor(ctx, ids)
+        return rows.map { it.copy(links = links[it.id] ?: emptySet(), extras = extras[it.id] ?: emptySet()) }
+    }
+
+    /** A moment with what the hub also carries: its import key and its references, as (kind, id). */
+    class HubMoment(val m: Moment, val src: String?, val refs: List<Pair<String, Long>>)
+
+    fun hubMoments(ctx: Context, from: Long, to: Long): List<HubMoment> =
+        withSrcAndRefs(ctx, readMoments(ctx, "ts >= ? AND ts < ?", args(from, to)))
+
+    fun hubMomentById(ctx: Context, id: Long): HubMoment? =
+        withSrcAndRefs(ctx, readMoments(ctx, "id = ?", args(id))).firstOrNull()
+
+    private fun withSrcAndRefs(ctx: Context, ms: List<Moment>): List<HubMoment> {
+        if (ms.isEmpty()) return emptyList()
+        val src = HashMap<Long, String>()
+        val refs = HashMap<Long, MutableList<Pair<String, Long>>>()
+        ms.chunked(500).forEach { chunk ->
+            val inList = chunk.joinToString(",") { it.id.toString() }
+            db(ctx).rawQuery("SELECT id, source_key FROM moment WHERE source_key IS NOT NULL AND id IN ($inList)", null).use { c ->
+                while (c.moveToNext()) src[c.getLong(0)] = c.getString(1)
+            }
+            db(ctx).rawQuery("SELECT moment_id, kind, ref_id FROM moment_ref WHERE moment_id IN ($inList)", null).use { c ->
+                while (c.moveToNext()) refs.getOrPut(c.getLong(0)) { ArrayList() }.add(c.getString(1) to c.getLong(2))
+            }
+        }
+        return ms.map { HubMoment(it, src[it.id], refs[it.id] ?: emptyList()) }
+    }
+
+    /**
+     * An entry from another device: updates row [id] if it exists, otherwise makes a new one.
+     * Returns the row id. Marks the days dirty for every export, like any edit.
+     */
+    fun hubPutEntry(
+        ctx: Context, id: Long?, activityId: Long, start: Long, links: Set<Long>, contextId: Long?, title: String?, extras: Set<Long>,
+    ): Long {
+        if (id != null && startOf(ctx, id) != null) {
+            updateEntry(ctx, id, activityId, start, links, contextId, title, extras)
+            return id
+        }
+        return tx(ctx) {
+            val nid = insert(ctx, activityId, start, contextId, title)
+            writeLinks(ctx, nid, links)
+            writeExtras(ctx, nid, extras - activityId)
+            nid
+        }
+    }
+
+    fun hubDeleteEntry(ctx: Context, id: Long) {
+        if (startOf(ctx, id) != null) deleteEntry(ctx, id)
+    }
+
+    /** A note or feeling from another device: updates row [id] if it exists, otherwise makes one. Returns the row id. */
+    fun hubPutMoment(
+        ctx: Context, id: Long?, ts: Long, kind: String, title: String, text: String, moodId: Long?, entryId: Long?,
+        tags: Collection<Long>, refs: Collection<Pair<String, Long>>, src: String?,
+    ): Long = tx(ctx) { d ->
+        var row = id?.let { i -> d.rawQuery("SELECT ts FROM moment WHERE id = ?", args(i)).use { c -> if (c.moveToFirst()) i to c.getLong(0) else null } }
+        if (row == null && src != null) {
+            row = d.rawQuery("SELECT id, ts FROM moment WHERE source_key = ?", arrayOf(src)).use { c -> if (c.moveToFirst()) c.getLong(0) to c.getLong(1) else null }
+        }
+        val v = ContentValues().apply {
+            put("ts", ts)
+            put("kind", if (kind == MomentKind.FEELING || kind == MomentKind.NOTE || kind == MomentKind.TRACKER) kind else MomentKind.NOTE)
+            put("title", title)
+            put("text", text)
+            if (moodId != null) put("mood_id", moodId) else putNull("mood_id")
+            if (entryId != null) put("entry_id", entryId) else putNull("entry_id")
+            if (src != null) put("source_key", src) else putNull("source_key")
+        }
+        val mid = if (row != null) {
+            d.update("moment", v, "id=?", args(row.first))
+            dirtyDay(ctx, row.second)
+            row.first
+        } else {
+            d.insertOrThrow("moment", null, v)
+        }
+        d.delete("moment_tag", "moment_id=?", args(mid))
+        writeTags(d, mid, tags)
+        d.delete("moment_ref", "moment_id=?", args(mid))
+        refs.distinct().forEach { (k, r) -> d.execSQL(StoreSql.INSERT_MOMENT_REF, arrayOf<Any>(mid, k, r)) }
+        dirtyDay(ctx, ts)
+        mid
+    }
+
+    fun hubDeleteMoment(ctx: Context, id: Long) {
+        val there = db(ctx).rawQuery("SELECT 1 FROM moment WHERE id = ?", args(id)).use { it.moveToFirst() }
+        if (there) deleteMoment(ctx, id)
+    }
+
+    /** Every diary day with an entry or a moment, for the first send of a whole log. */
+    fun hubAllDays(ctx: Context): List<Long> {
+        val days = java.util.TreeSet<Long>()
+        db(ctx).rawQuery("SELECT start_ms FROM entry UNION ALL SELECT ts FROM moment", null).use { c ->
+            while (c.moveToNext()) days.add(DiaryDay.start(c.getLong(0)))
+        }
+        return days.toList()
+    }
 }
 
 object Prefs {

@@ -9,7 +9,8 @@
          and reads planned events. Only ever changes events the app made itself. Asked for in Settings. -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
-    <!-- Internet: used only to send your log to Toggl Track (api.track.toggl.com), when you turn that on in Settings.
+    <!-- Internet: used only to sync your log with your Now hub (a Google Sheet's script, script.google.com) and to send
+         it to Toggl Track (api.track.toggl.com), each only when you turn it on in Settings.
          No updater and no install permission here: the Widget Updater app does the updating. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
@@ -122,6 +123,11 @@
         <!-- Sends the log to Toggl at the next attempt time (needs a network). -->
         <service
             android:name=".TogglJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <!-- Syncs with the Now hub (a Google Sheet shared with the PC): after changes and every 15 minutes (needs a network). -->
+        <service
+            android:name=".HubJob"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE" />
         <!-- Redraws the widget when a planned event starts or ends (its activity gets the first button). -->

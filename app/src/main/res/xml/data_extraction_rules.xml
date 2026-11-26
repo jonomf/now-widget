@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Keeps the Toggl API token (its own preferences file, toggl_secret) out of cloud backups and device-to-device transfers.
+<!-- Keeps the Toggl API token and the hub key (their own preferences files, toggl_secret and hub_secret) out of cloud backups and device-to-device transfers.
      The app also has allowBackup off. -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="toggl_secret.xml" />
+        <exclude domain="sharedpref" path="hub_secret.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="toggl_secret.xml" />
+        <exclude domain="sharedpref" path="hub_secret.xml" />
     </device-transfer>
 </data-extraction-rules>

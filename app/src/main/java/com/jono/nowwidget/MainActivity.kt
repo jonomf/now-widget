@@ -44,11 +44,13 @@ class MainActivity : Activity() {
     private lateinit var obsidian: ObsidianSection
     private lateinit var calendar: CalendarSection
     private lateinit var toggl: TogglSection
+    private lateinit var hub: HubSection
     private var periodDays = 1
     private val redraw: () -> Unit = { runOnUiThread { refresh() } }
     private val redrawObsidian: () -> Unit = { runOnUiThread { obsidian.refresh() } }
     private val redrawCalendar: () -> Unit = { runOnUiThread { calendar.refresh() } }
     private val redrawToggl: () -> Unit = { runOnUiThread { toggl.refresh() } }
+    private val redrawHub: () -> Unit = { runOnUiThread { hub.refresh() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -169,7 +171,7 @@ class MainActivity : Activity() {
 
         // --- Data ---
         col.addView(heading("Your data"))
-        col.addView(note("Your log stays on this phone, unless you turn on an export below: the calendar export, which Google's own sync uploads, or the Toggl export, which sends it to Toggl's servers. Toggl is the only thing in the app that uses the internet."))
+        col.addView(note("Your log stays on this phone, unless you turn on the hub sync or an export below: the hub, a Google Sheet of your own that your PC's Now widget shares; the calendar export, which Google's own sync uploads; or the Toggl export, which sends it to Toggl's servers. The hub and Toggl are the only things in the app that use the internet."))
         col.addView(button("Export CSV") { startExport(REQUEST_EXPORT, "now-", "") })
         col.addView(button("Export check-ins (CSV)") { startExport(REQUEST_EXPORT_MOMENTS, "now-checkins-", "") })
         col.addView(button("Export feelings (Daylio CSV)") { startExport(REQUEST_EXPORT_FEELINGS, "now-feelings-", "") })
@@ -183,6 +185,10 @@ class MainActivity : Activity() {
         // --- Calendar ---
         calendar = CalendarSection(this)
         col.addView(calendar.view)
+
+        // --- Hub (sync with the PC) ---
+        hub = HubSection(this)
+        col.addView(hub.view)
 
         // --- Toggl ---
         toggl = TogglSection(this)
@@ -228,11 +234,15 @@ class MainActivity : Activity() {
         ObsidianExport.listeners.add(redrawObsidian)
         CalendarExport.listeners.add(redrawCalendar)
         TogglExport.listeners.add(redrawToggl)
+        HubSync.listeners.add(redrawHub)
         WidgetRenderer.refresh(this)
         ObsidianExport.onAppOpen(this)
         CalendarExport.onAppOpen(this)
         TogglExport.onAppOpen(this)
+        HubSync.onAppOpen(this)
+        HubSync.schedulePoll(this)
         toggl.refresh()
+        hub.refresh()
         // Access may have been changed in App info while away.
         calendar.reload()
     }
@@ -242,6 +252,7 @@ class MainActivity : Activity() {
         ObsidianExport.listeners.remove(redrawObsidian)
         CalendarExport.listeners.remove(redrawCalendar)
         TogglExport.listeners.remove(redrawToggl)
+        HubSync.listeners.remove(redrawHub)
         super.onPause()
     }
 
