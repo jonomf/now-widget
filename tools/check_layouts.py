@@ -15,10 +15,10 @@ for f in glob.glob(root+'/res/**/*.xml',recursive=True)+[root+'/AndroidManifest.
 need={
  'widget_tile':'root head cur_emoji cur_name cur_elapsed btn_note update_symbol claude flow_hit flow_hit_area flow_chip',
  'widget_strip':'root head cur_emoji cur_name cur_elapsed cur_since slots btn_note update_symbol claude flow_controls flow_top flow_bottom1 flow_bottom2',
- 'widget_block':'root head cur_emoji cur_name cur_elapsed cur_since bar people_inline people_row places_row context_row grid breakdown btn_note update_symbol claude',
+ 'widget_block':'root head cur_emoji cur_name cur_elapsed cur_since bar people_inline people_row places_row context_row grid breakdown btn_note update_symbol claude started_box',
  'slot':'slot_root slot_emoji slot_label','slot_compact':'slot_root slot_emoji slot_label','slot_big':'slot_root slot_emoji slot_label',
  'row':'row','row_fixed':'row','chip':'chip','breakdown_row':'b_root b_name b_time',
- 'notif_collapsed':'row','notif_big':'grid people_row','flow_steps':'flow_steps','flow_btn':'flow_btn','flow_ctl_row':'row'}
+ 'notif_collapsed':'row','notif_big':'grid people_row started_box','started_row':'started_row started_label','flow_steps':'flow_steps','flow_btn':'flow_btn','flow_ctl_row':'row'}
 for l,v in need.items():
     m=set(v.split())-ids[l]
     if m: print('MISSING',l,m); ok=False

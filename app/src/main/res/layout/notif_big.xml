@@ -5,6 +5,14 @@
     android:layout_height="wrap_content"
     android:orientation="vertical">
 
+    <!-- Start-time chips (−5, −15, …): times and activity names only, never moods. -->
+    <LinearLayout
+        android:id="@+id/started_box"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone" />
+
     <LinearLayout
         android:id="@+id/grid"
         android:layout_width="match_parent"

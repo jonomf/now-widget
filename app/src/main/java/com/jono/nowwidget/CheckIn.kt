@@ -134,10 +134,13 @@ class FlowJob : JobService() {
         const val JOB_ID = 4206
         private const val SLACK_MS = 30_000L
 
-        fun schedule(ctx: Context, inMs: Long) {
+        /** The start-time controls' redraw (Undo and ⚠ running out); its own id, so it never replaces the flow's. */
+        const val START_JOB_ID = 4207
+
+        fun schedule(ctx: Context, inMs: Long, jobId: Int = JOB_ID) {
             val scheduler = ctx.getSystemService(JobScheduler::class.java) ?: return
             val delay = maxOf(0L, inMs) + 1_000L
-            val info = JobInfo.Builder(JOB_ID, ComponentName(ctx, FlowJob::class.java))
+            val info = JobInfo.Builder(jobId, ComponentName(ctx, FlowJob::class.java))
                 .setMinimumLatency(delay)
                 .setOverrideDeadline(delay + SLACK_MS)
                 .build()

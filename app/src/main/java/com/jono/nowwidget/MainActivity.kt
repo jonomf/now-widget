@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
@@ -21,6 +22,7 @@ import com.jono.nowwidget.core.Csv
 import com.jono.nowwidget.core.Daylio
 import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.LinkKind
+import com.jono.nowwidget.core.StartShift
 import com.jono.nowwidget.core.levelFace
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -33,6 +35,7 @@ class MainActivity : Activity() {
     private lateinit var stats: LinearLayout
     private lateinit var periodButtons: List<Button>
     private lateinit var stepButton: Button
+    private lateinit var askButton: Button
     private lateinit var lockCountButton: Button
     private lateinit var sizes: TextView
     private lateinit var updateStatus: TextView
@@ -94,6 +97,15 @@ class MainActivity : Activity() {
         col.addView(
             note("Tap a different activity to switch. Switched by mistake? Tap the right one within a minute and the mistake disappears.")
         )
+        col.addView(toggle(
+            "Smart button order",
+            Prefs.smartOrder(this),
+        ) { on -> Prefs.setSmartOrder(this, on) })
+        col.addView(note("When your activities don't all fit, the buttons show what you usually do at this time of day."))
+
+        // --- Start time ---
+        col.addView(heading("Start time"))
+        col.addView(note("Started a while ago? Move the current activity's start back with the −5 / −15 / … chips in the expand panel, the check-in after a switch and the lock screen. It cuts into the one before (✂; ⇤ when it reaches that one's start, which is always kept), and Undo puts it back for a minute."))
         stepButton = button("") {
             val options = listOf(0, 5, 10, 15, 30)
             val next = options[(options.indexOf(Prefs.stepMinutes(this)) + 1) % options.size]
@@ -101,13 +113,31 @@ class MainActivity : Activity() {
             refresh()
         }
         col.addView(stepButton)
-        col.addView(toggle(
-            "Smart button order",
-            Prefs.smartOrder(this),
-        ) { on -> Prefs.setSmartOrder(this, on) })
-        col.addView(note("When your activities don't all fit, the buttons show what you usually do at this time of day."))
+        col.addView(label("Offsets to show (minutes, up to ${StartShift.MAX_OFFSETS})"))
+        val offsetsField = EditText(this).apply {
+            setSingleLine(true)
+            setText(StartShift.offsetsText(Prefs.startOffsets(this@MainActivity)))
+        }
+        col.addView(offsetsField)
+        col.addView(button("Save offsets") {
+            val v = StartShift.parseOffsets(offsetsField.text.toString()).ifEmpty { StartShift.DEFAULT_OFFSETS }
+            Prefs.setStartOffsets(this, v)
+            offsetsField.setText(StartShift.offsetsText(v))
+            WidgetRenderer.refresh(this)
+            Toast.makeText(this, "Offsets: " + v.joinToString(" ") { StartShift.offsetText(it) }, Toast.LENGTH_SHORT).show()
+        })
+        col.addView(toggle("Show in check-in flow", Prefs.startInFlow(this)) { on -> Prefs.setStartInFlow(this, on) })
+        askButton = button("") {
+            val c = StartShift.ASK_CHOICES
+            Prefs.setAskOverMin(this, c[(c.indexOf(Prefs.askOverMin(this)) + 1) % c.size])
+            refresh()
+            WidgetRenderer.refresh(this)
+        }
+        col.addView(askButton)
+        col.addView(note("When a chip would cut more than that from the activity before, it shows ⚠ and needs a second tap within 5 seconds."))
 
         // --- Check-in after each switch ---
+        col.addView(heading("Check-in after each switch"))
         col.addView(note("After you switch, the widget asks where you are, who you're with and how you feel, one step at a time. Ignore it and it goes back to the buttons after 90 seconds."))
         val flow = Prefs.flowSettings(this)
         col.addView(flowToggle("Ask where after each switch", "flow_where", flow.where))
@@ -238,6 +268,8 @@ class MainActivity : Activity() {
         } ?: "Nothing right now"
         val step = Prefs.stepMinutes(this)
         stepButton.text = "Tapping the current one again: " + if (step == 0) "turn it off" else "back $step min"
+        val ask = Prefs.askOverMin(this)
+        askButton.text = "Ask before cutting more than: " + if (ask == 0) "off" else "$ask min"
         lockCountButton.text = "Lock screen buttons: ${Prefs.lockButtons(this)}"
         sizes.text = WidgetRenderer.describeSizes(this)
         val build = UpdateStatus.currentBuild(this)

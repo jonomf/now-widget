@@ -95,6 +95,7 @@ object Notifier {
     private fun flowExpanded(ctx: Context, s: Snapshot, flow: FlowState): RemoteViews {
         val rv = RemoteViews(ctx.packageName, R.layout.notif_big)
         val view = CheckInFlow.block(flow, "", s.flowOptions, BIG_COLS, BIG_FLOW_ROWS)
+        WidgetRenderer.startedRow(ctx, rv, R.id.started_box, s, WidgetRenderer.StartedMode.NOTIF)
         WidgetRenderer.flowGrid(ctx, rv, R.id.grid, R.layout.row_fixed, R.layout.slot, view.copy(steps = null))
         rv.removeAllViews(R.id.people_row)
         rv.setViewVisibility(R.id.people_row, android.view.View.GONE)
@@ -103,6 +104,8 @@ object Notifier {
 
     private fun expanded(ctx: Context, s: Snapshot): RemoteViews {
         val rv = RemoteViews(ctx.packageName, R.layout.notif_big)
+        // Start-time chips: times and activity names are on the lock screen already; never moods.
+        WidgetRenderer.startedRow(ctx, rv, R.id.started_box, s, WidgetRenderer.StartedMode.NOTIF)
         WidgetRenderer.grid(ctx, rv, R.id.grid, R.layout.row_fixed, R.layout.slot, s, BIG_COLS, BIG_ROWS)
         WidgetRenderer.people(ctx, rv, R.id.people_row, s, BIG_PEOPLE, names = true)
         return rv

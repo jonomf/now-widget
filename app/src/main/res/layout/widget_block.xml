@@ -84,6 +84,14 @@
             android:textSize="15sp" />
     </LinearLayout>
 
+    <!-- Start-time chips: in the check-in flow's first step, and always in the expand panel. -->
+    <LinearLayout
+        android:id="@+id/started_box"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone" />
+
     <ImageView
         android:id="@+id/bar"
         android:layout_width="match_parent"

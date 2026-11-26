@@ -37,6 +37,7 @@ import com.jono.nowwidget.core.Mood
 import com.jono.nowwidget.core.ObsidianDay
 import com.jono.nowwidget.core.PALETTE
 import com.jono.nowwidget.core.Schema
+import com.jono.nowwidget.core.StartShift
 import com.jono.nowwidget.core.StoreSql
 import com.jono.nowwidget.core.Span
 import com.jono.nowwidget.core.TagTarget
@@ -624,6 +625,53 @@ object Store {
         val floor = if (prev != null) prev.start + 60_000L else 0L
         val start = maxOf(cur.start - byMs, floor)
         if (start < cur.start) setStart(ctx, cur.id, start)
+    }
+
+    // --- Moving the current start (the rules are in core/StartShift.kt) ---
+
+    /** The current entry and the one before it (idle counts), or null when nothing is on. */
+    fun currentAndBefore(ctx: Context): Pair<Entry, Entry?>? {
+        val cur = current(ctx) ?: return null
+        return cur to before(ctx, cur)
+    }
+
+    /** What moving the current start by [minutes] would do (nothing is changed). */
+    fun previewShift(ctx: Context, minutes: Int, now: Long = System.currentTimeMillis()): StartShift.Shift? =
+        currentAndBefore(ctx)?.let { (cur, prev) -> StartShift.by(cur, prev, minutes, now) }
+
+    /** What moving the current start to [target] would do (nothing is changed). */
+    fun previewShiftTo(ctx: Context, target: Long, now: Long = System.currentTimeMillis()): StartShift.Shift? =
+        currentAndBefore(ctx)?.let { (cur, prev) -> StartShift.to(cur, prev, target, now) }
+
+    /**
+     * Applies [s] if the current entry is still the one it was worked out for, with the same start.
+     * The entry before is never touched (its end is this start); moments keep their times. Every
+     * diary day between the old and new start is marked dirty for all exports. Returns whether it applied.
+     */
+    fun applyShift(ctx: Context, s: StartShift.Shift): Boolean {
+        val cur = current(ctx) ?: return false
+        if (cur.id != s.entryId || cur.start != s.oldStart || !s.changed) return false
+        setStart(ctx, cur.id, s.newStart)
+        val d = db(ctx)
+        StartShift.daysTouched(s.oldStart, s.newStart).forEach { markDay(d, it) }
+        exportersChanged(ctx)
+        lastTapAct = -1L
+        return true
+    }
+
+    /** Puts the start back where an adjustment found it, if that adjustment is still the last change. */
+    fun undoShift(ctx: Context, u: StartShift.Undo, now: Long = System.currentTimeMillis()): Boolean {
+        val cur = current(ctx)
+        if (!StartShift.undoLive(u, cur, now) || cur == null) return false
+        val prev = before(ctx, cur)
+        // The same rules: the old start was valid, but don't trust it blindly.
+        val back = StartShift.to(cur, prev, u.oldStart, now)
+        if (!back.changed) return false
+        setStart(ctx, cur.id, back.newStart)
+        val d = db(ctx)
+        StartShift.daysTouched(u.newStart, back.newStart).forEach { markDay(d, it) }
+        exportersChanged(ctx)
+        return true
     }
 
     private fun setStart(ctx: Context, id: Long, start: Long) {
@@ -1559,6 +1607,22 @@ object Prefs {
         )
     }
     fun setFlowSetting(ctx: Context, key: String, on: Boolean) = p(ctx).edit().putBoolean(key, on).apply()
+
+    /** Start time: the offset chips (minutes), whether the flow shows them, and when to ask before cutting. */
+    fun startOffsets(ctx: Context): List<Int> =
+        p(ctx).getString("start_offsets", null)?.let { StartShift.parseOffsets(it) }?.takeIf { it.isNotEmpty() }
+            ?: StartShift.DEFAULT_OFFSETS
+    fun setStartOffsets(ctx: Context, v: List<Int>) = p(ctx).edit().putString("start_offsets", StartShift.offsetsText(v)).apply()
+    fun startInFlow(ctx: Context): Boolean = p(ctx).getBoolean("start_in_flow", true)
+    fun setStartInFlow(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("start_in_flow", on).apply()
+    fun askOverMin(ctx: Context): Int = p(ctx).getInt("start_ask_over", 0)
+    fun setAskOverMin(ctx: Context, v: Int) = p(ctx).edit().putInt("start_ask_over", v).apply()
+
+    /** The last start adjustment (for Undo and the head line's note) and a ⚠ chip waiting for its second tap. */
+    fun shiftUndo(ctx: Context): StartShift.Undo? = StartShift.Undo.decode(p(ctx).getString("start_undo", null))
+    fun setShiftUndo(ctx: Context, u: StartShift.Undo?) = p(ctx).edit().putString("start_undo", u?.encode()).commit().let { }
+    fun shiftArmed(ctx: Context): StartShift.Armed? = StartShift.Armed.decode(p(ctx).getString("start_armed", null))
+    fun setShiftArmed(ctx: Context, a: StartShift.Armed?) = p(ctx).edit().putString("start_armed", a?.encode()).commit().let { }
 
     /** The running check-in flow (core FlowState.encode), kept across process deaths. */
     fun flowState(ctx: Context): String? = p(ctx).getString("flow_state", null)

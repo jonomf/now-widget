@@ -1,13 +1,18 @@
 package com.jono.nowwidget
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.app.TimePickerDialog
 import android.content.Intent
 import android.os.Bundle
+import android.text.format.DateFormat
 import android.view.Gravity
 import android.widget.FrameLayout
 import com.jono.nowwidget.core.FlowStep
+import com.jono.nowwidget.core.FreeWrite
 import com.jono.nowwidget.core.FlowTap
 import com.jono.nowwidget.core.LinkKind
+import java.util.Calendar
 import kotlin.math.min
 
 /**
@@ -23,6 +28,7 @@ class PanelActivity : Activity() {
     /** A ＋ was tapped: the flow step's or the link kind's picker opens once the panel shows. */
     private var pendingFind: String? = null
     private var pendingAdd: String? = null
+    private var pendingSetTime = false
     private val redraw: () -> Unit = { runOnUiThread { onChanged() } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,6 +45,7 @@ class PanelActivity : Activity() {
         if (savedInstanceState == null) {
             pendingFind = intent?.getStringExtra(EXTRA_FIND)
             pendingAdd = intent?.getStringExtra(EXTRA_ADD)
+            pendingSetTime = intent?.getBooleanExtra(EXTRA_SET_TIME, false) == true
         }
     }
 
@@ -47,6 +54,7 @@ class PanelActivity : Activity() {
         setIntent(intent)
         pendingFind = intent.getStringExtra(EXTRA_FIND)
         pendingAdd = intent.getStringExtra(EXTRA_ADD)
+        pendingSetTime = intent.getBooleanExtra(EXTRA_SET_TIME, false)
     }
 
     override fun onResume() {
@@ -59,9 +67,52 @@ class PanelActivity : Activity() {
         }
         val find = pendingFind
         val add = pendingAdd
+        val setTime = pendingSetTime
         pendingFind = null
         pendingAdd = null
-        if (find != null) find(find) else if (add != null) add(add)
+        pendingSetTime = false
+        if (find != null) find(find) else if (add != null) add(add) else if (setTime) setTime()
+    }
+
+    /**
+     * "Set time…": when you really started. A time later than now means yesterday (just after
+     * midnight). Same rules as the chips (never past now, never deleting the entry before); the
+     * confirm names what it cuts and by how much.
+     */
+    private fun setTime() {
+        val cur = Store.current(this) ?: return
+        val c = Calendar.getInstance().apply { timeInMillis = cur.start }
+        TimePickerDialog(this, { _, h, m ->
+            val now = System.currentTimeMillis()
+            val pick = Calendar.getInstance().apply {
+                timeInMillis = now
+                set(Calendar.HOUR_OF_DAY, h)
+                set(Calendar.MINUTE, m)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }
+            if (pick.timeInMillis > now) pick.add(Calendar.DAY_OF_MONTH, -1)
+            val shift = Store.previewShiftTo(this, pick.timeInMillis, now) ?: return@TimePickerDialog
+            if (!shift.changed) return@TimePickerDialog
+            val acts = Store.allActs(this).associateBy { it.id }
+            val act = acts[cur.activityId]
+            val prevAct = shift.prevActivityId?.let { acts[it] }
+            val what = FreeWrite.name(cur.title, act)
+            val cut = when {
+                shift.prevIdle || prevAct == null -> ""
+                shift.clamped -> " It stops at the start of " + prevAct.emoji + " " + prevAct.name + ", which is kept as one minute."
+                shift.cuts -> " This cuts " + Fmt.dur(shift.cutMs) + " from " + prevAct.emoji + " " + prevAct.name + "."
+                else -> " " + prevAct.name + " gets " + Fmt.dur(shift.newStart - shift.oldStart) + " back."
+            }
+            AlertDialog.Builder(this)
+                .setMessage("Start " + what + " at " + Fmt.time(this, shift.newStart) + "?" + cut)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Set") { _, _ ->
+                    StartControls.apply(this, shift)
+                    WidgetRenderer.refresh(this)
+                }
+                .show()
+        }, c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE), DateFormat.is24HourFormat(this)).show()
     }
 
     /**
@@ -133,6 +184,8 @@ class PanelActivity : Activity() {
         const val EXTRA_FIND = "find"
         /** A link kind: a people / places / contexts row's ＋ was tapped. */
         const val EXTRA_ADD = "add"
+        /** The Started row's "Set time…". */
+        const val EXTRA_SET_TIME = "set_time"
     }
 
     private fun show(s: Snapshot) {

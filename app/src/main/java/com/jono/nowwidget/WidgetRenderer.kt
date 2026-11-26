@@ -33,6 +33,7 @@ import com.jono.nowwidget.core.Link
 import com.jono.nowwidget.core.LinkKind
 import com.jono.nowwidget.core.LogRules
 import com.jono.nowwidget.core.PlannedNudge
+import com.jono.nowwidget.core.StartShift
 import java.util.concurrent.CopyOnWriteArraySet
 
 /** Everything a redraw needs, loaded once and shared by every layout and the notification. */
@@ -62,6 +63,18 @@ class Snapshot(
     val flow: FlowState? = null,
     /** The current step's chips, best first (all of them; each size takes what fits). */
     val flowOptions: List<FlowOption> = emptyList(),
+    /** Start time: the entry before the current one (idle counts), and what each chip would do. */
+    val prev: Entry? = null,
+    val prevAct: Act? = null,
+    val offsets: List<Int> = emptyList(),
+    val previews: Map<Int, StartShift.Shift> = emptyMap(),
+    val askOverMin: Int = 0,
+    val armed: StartShift.Armed? = null,
+    /** The adjustment that can still be undone, and the head line's note about it. */
+    val undo: StartShift.Undo? = null,
+    val shiftNote: String? = null,
+    val prevLength: String? = null,
+    val startInFlow: Boolean = true,
 ) {
     /** What you're doing, by name: a free-written title, else the activity's name. */
     val name: String get() = FreeWrite.name(cur?.title, act)
@@ -128,6 +141,13 @@ object WidgetRenderer {
             contextInHead = true),
     }
 
+    /** The panel's "give time back" chip. */
+    private const val START_LATER = 5
+    /** The Started row's sizes: the label, a chip (with its ✂), chips per panel row. */
+    private const val START_LABEL_DP = 60f
+    private const val START_CHIP_DP = 52f
+    private const val PANEL_START_CHIPS = 5
+
     /** Not a widget size: the floating panel that small widgets open. */
     private val PANEL_COLS = 5
     private val PANEL_ROWS = 6
@@ -163,6 +183,13 @@ object WidgetRenderer {
             .sortedByDescending { it.second }
         val buttons = acts.filter { it.show && !it.archived }
         val flow = CheckIn.current(ctx, cur, links, now)
+        val prev = cur?.let { Store.currentAndBefore(ctx)?.second }
+        val prevAct = prev?.let { p -> byId[p.activityId] }
+        val offsets = Prefs.startOffsets(ctx)
+        val previews = if (cur == null) emptyMap() else (offsets + START_LATER).distinct()
+            .associateWith { StartShift.by(cur, prev, it, now) }
+        val undo = StartControls.liveUndo(ctx, cur, now)
+        val prevName = prevAct?.let { FreeWrite.name(prev.title, it) }
         return Snapshot(
             now = now,
             cur = cur,
@@ -184,6 +211,16 @@ object WidgetRenderer {
             nudge = nudge(ctx, now, buttons, byId),
             flow = flow,
             flowOptions = if (flow == null) emptyList() else flowOptions(ctx, flow, links, now),
+            prev = prev,
+            prevAct = prevAct,
+            offsets = offsets,
+            previews = previews,
+            askOverMin = Prefs.askOverMin(ctx),
+            armed = Prefs.shiftArmed(ctx),
+            undo = undo,
+            shiftNote = undo?.let { StartShift.feedback(it, prevName, prevAct?.emoji ?: "") },
+            prevLength = undo?.let { StartShift.prevLength(it, prevName) },
+            startInFlow = Prefs.startInFlow(ctx),
         )
     }
 
@@ -231,6 +268,7 @@ object WidgetRenderer {
         head(ctx, rv, s, showSince = true, withTotal = true, withPlace = true, withContext = true)
         rv.setOnClickPendingIntent(R.id.head, openApp(ctx))
         bar(rv, barBitmap(s))
+        startedRow(ctx, rv, R.id.started_box, s, StartedMode.PANEL)
         val flow = s.flow
         if (flow != null) {
             // The whole step at full size: this is where the 1×1 and the small strips send you.
@@ -259,6 +297,8 @@ object WidgetRenderer {
         head(ctx, rv, s, showSince = k != Kind.TILE, withTotal = isBlock, withPlace = k.placeInHead,
             withContext = k.contextInHead)
         rv.setOnClickPendingIntent(R.id.head, if (k.expands) openPanel(ctx) else openApp(ctx))
+        // Block sizes: the elapsed timer opens the panel, where the Started row is.
+        if (isBlock) rv.setOnClickPendingIntent(R.id.cur_elapsed, openPanel(ctx))
         val flow = s.flow
         if (k == Kind.TILE) tile(ctx, rv, s)
         if (flow != null && k != Kind.TILE) {
@@ -274,6 +314,7 @@ object WidgetRenderer {
         if (isBlock) {
             // Sizes share this layout and Android may reapply one onto another's views, so every
             // optional part is set either way.
+            startedRow(ctx, rv, R.id.started_box, s, StartedMode.NONE)
             bar(rv, barBmp)
             if (k.peopleMode == PEOPLE_INLINE) people(ctx, rv, R.id.people_inline, s, k.peopleMax, names = false)
             else clear(rv, R.id.people_inline)
@@ -325,6 +366,9 @@ object WidgetRenderer {
         }
         val view = CheckInFlow.block(flow, name, s.flowOptions, k.cols, k.rows)
         rv.setTextViewText(R.id.cur_name, view.head)
+        // "Started" chips at the top of the first step shown (not a step of its own).
+        startedRow(ctx, rv, R.id.started_box, s,
+            if (s.startInFlow && flow.step == flow.steps.firstOrNull()) StartedMode.FLOW else StartedMode.NONE, k.size.width)
         bar(rv, barBmp)
         // The step has the room; every optional part is still set, since sizes share this layout.
         clear(rv, R.id.people_inline)
@@ -450,6 +494,72 @@ object WidgetRenderer {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
+    enum class StartedMode { NONE, FLOW, PANEL, NOTIF }
+
+    /**
+     * The start-time row in [container]: a label, then a chip per offset ("−30 ✂", "−60 ⇤",
+     * "−30 ⚠"), and per mode: the flow adds "Now ✓" (the default: no change, or undo), the panel
+     * adds ＋5, Undo while it's there, and "Set time…". Hidden for [StartedMode.NONE] or when nothing is on.
+     */
+    fun startedRow(ctx: Context, rv: RemoteViews, container: Int, s: Snapshot, mode: StartedMode, widthDp: Float = 340f) {
+        rv.removeAllViews(container)
+        val cur = s.cur
+        if (mode == StartedMode.NONE || cur == null) {
+            rv.setViewVisibility(container, View.GONE)
+            return
+        }
+        rv.setViewVisibility(container, View.VISIBLE)
+        // Each chip: its label, whether it's highlighted, and what it does.
+        val chips = ArrayList<Triple<String, Boolean, PendingIntent>>()
+        val offsets = if (mode == StartedMode.PANEL) s.offsets + START_LATER else s.offsets
+        offsets.distinct().forEach { m ->
+            val p = s.previews[m] ?: return@forEach
+            if (!p.changed && m > 0) return@forEach // nothing to give back
+            val armed = StartShift.isArmed(s.armed, cur.id, m, s.now)
+            chips.add(Triple(StartShift.chipLabel(m, p, s.askOverMin, armed), armed, NowWidget.shiftIntent(ctx, cur.id, m.toString())))
+        }
+        val undo = s.undo
+        if (mode == StartedMode.PANEL) {
+            if (undo != null) chips.add(Triple("Undo", false, NowWidget.shiftIntent(ctx, cur.id, "undo")))
+            chips.add(Triple("Set time…", false, openSetTime(ctx)))
+        }
+
+        fun row(label: String?, items: List<Triple<String, Boolean, PendingIntent>>) {
+            val r = RemoteViews(ctx.packageName, R.layout.started_row)
+            r.setTextViewText(R.id.started_label, label ?: "")
+            r.setViewVisibility(R.id.started_label, if (label == null) View.GONE else View.VISIBLE)
+            items.forEach { (text, on, intent) ->
+                val chip = RemoteViews(ctx.packageName, R.layout.chip)
+                chip.setTextViewText(R.id.chip, text)
+                chip.setInt(R.id.chip, "setBackgroundResource", if (on) R.drawable.slot_on else R.drawable.slot_off)
+                chip.setOnClickPendingIntent(R.id.chip, intent)
+                r.addView(R.id.started_row, chip)
+            }
+            rv.addView(container, r)
+        }
+
+        if (mode == StartedMode.PANEL) {
+            // The panel has room: the time on its own line, then the chips in rows that never clip.
+            row("Started " + Fmt.time(ctx, cur.start) + " (" + Fmt.dur(s.now - cur.start) + " ago)" +
+                (s.prevLength?.let { " · $it" } ?: ""), emptyList())
+            chips.chunked(PANEL_START_CHIPS).forEach { row(null, it) }
+            return
+        }
+        // One line: as many offsets as fit beside "Started" (and "Now ✓" in the flow), nearest first.
+        val now = if (mode == StartedMode.FLOW) Triple("Now ✓", undo == null, NowWidget.shiftIntent(ctx, cur.id, "now")) else null
+        val room = maxOf(1, ((widthDp - START_LABEL_DP) / START_CHIP_DP).toInt() - (if (now != null) 1 else 0))
+        row("Started", chips.take(room) + listOfNotNull(now))
+    }
+
+    /** The panel's "Set time…": the panel again, with the time picker open. */
+    private fun openSetTime(ctx: Context): PendingIntent = PendingIntent.getActivity(
+        ctx, 14,
+        Intent(ctx, PanelActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .putExtra(PanelActivity.EXTRA_SET_TIME, true),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
     private fun head(
         ctx: Context,
         rv: RemoteViews,
@@ -503,7 +613,8 @@ object WidgetRenderer {
         if (withPlace && place != null) parts.add(if (place.emoji.isBlank()) "at " + place.title else place.label)
         val context = s.context
         if (withContext && context != null) parts.add(if (context.emoji.isBlank()) "in " + context.title else context.label)
-        parts.add(s.sinceText)
+        // Just after a start adjustment: "since 2:15p · ✂ 15m from 🍽️ Eat", for a minute.
+        parts.add(s.shiftNote?.let { s.sinceText + " · " + it } ?: s.sinceText)
         if (withTotal && s.todayTotal > 0) parts.add(Fmt.dur(s.todayTotal) + " today")
         return parts.joinToString(" · ")
     }

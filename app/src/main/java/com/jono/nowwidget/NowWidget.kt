@@ -26,6 +26,21 @@ class NowWidget : AppWidgetProvider() {
                 Store.tap(ctx, id)?.let { CheckIn.start(ctx, it) }
                 WidgetRenderer.refresh(ctx)
             }
+            // Start-time chips: now://shift/<entry>/<minutes|undo|now>. A chip drawn for another entry does nothing.
+            ACTION_SHIFT -> {
+                val seg = intent.data?.pathSegments
+                val entry = seg?.getOrNull(0)?.toLongOrNull()
+                val what = seg?.getOrNull(1)
+                if (entry != null && what != null) {
+                    when (what) {
+                        "undo" -> StartControls.undo(ctx, entry)
+                        // "Now ✓": the start as it was; after an adjustment, that's its undo.
+                        "now" -> StartControls.undo(ctx, entry)
+                        else -> what.toIntOrNull()?.let { StartControls.tap(ctx, entry, it) }
+                    }
+                }
+                WidgetRenderer.refresh(ctx)
+            }
             ACTION_FLOW -> {
                 parseFlow(intent.data)?.let { (step, tap) -> CheckIn.tap(ctx, tap, step) }
                 WidgetRenderer.refresh(ctx)
@@ -47,6 +62,7 @@ class NowWidget : AppWidgetProvider() {
         private const val ACTION_LINK = "com.jono.nowwidget.LINK"
         private const val ACTION_DISMISSED = "com.jono.nowwidget.DISMISSED"
         private const val ACTION_FLOW = "com.jono.nowwidget.FLOW"
+        private const val ACTION_SHIFT = "com.jono.nowwidget.SHIFT"
 
         private fun broadcast(ctx: Context, action: String, uri: String): PendingIntent =
             PendingIntent.getBroadcast(
@@ -58,6 +74,10 @@ class NowWidget : AppWidgetProvider() {
         fun tapIntent(ctx: Context, activityId: Long) = broadcast(ctx, ACTION_TAP, "now://activity/$activityId")
         fun linkIntent(ctx: Context, linkId: Long) = broadcast(ctx, ACTION_LINK, "now://link/$linkId")
         fun dismissedIntent(ctx: Context) = broadcast(ctx, ACTION_DISMISSED, "now://dismissed/0")
+
+        /** A start-time chip for entry [entryId]: minutes ("-30", "5"), "undo" or "now". */
+        fun shiftIntent(ctx: Context, entryId: Long, what: String) =
+            broadcast(ctx, ACTION_SHIFT, "now://shift/$entryId/$what")
 
         /** A check-in flow chip or button, drawn for [step]: now://flow/<step>/<key>/<id>. */
         fun flowIntent(ctx: Context, step: FlowStep, key: String, id: Long) =
