@@ -14,7 +14,9 @@ import com.jono.nowwidget.core.NoteFile
 import com.jono.nowwidget.core.NoteFolder
 import com.jono.nowwidget.core.WriteTarget
 import com.jono.nowwidget.core.DayMoment
+import com.jono.nowwidget.core.DayAct
 import com.jono.nowwidget.core.DaySpan
+import com.jono.nowwidget.core.Together
 import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.LinkKind
 import com.jono.nowwidget.core.ObsidianDay
@@ -250,6 +252,8 @@ object ObsidianExport {
                 context = s.entry.contextId?.let { lk.links[it]?.title },
                 running = isToday && lk.runningId == s.entry.id,
                 title = s.entry.title,
+                also = Together.acts(s.entry).drop(1).mapNotNull { id -> lk.acts[id] }
+                    .map { DayAct(it.id, it.name, it.emoji, it.group) },
             )
         }
         val dayMoments = moments.map { mo ->

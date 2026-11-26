@@ -176,6 +176,8 @@ class PanelActivity : Activity() {
     }
 
     private var scroll: ScrollView? = null
+    /** The Doing section's "Tap to: Switch · Add"; Switch until changed, for as long as the panel is open. */
+    private var addMode = false
 
     private fun show(s: Snapshot) {
         if (isFinishing) return
@@ -188,7 +190,10 @@ class PanelActivity : Activity() {
         }
         // The sections: ordinary views, so the panel can scroll when it's taller than the screen.
         val sv = ScrollView(this).apply { setBackgroundResource(R.drawable.widget_bg) }
-        sv.addView(PanelBody(this, s, { setTime() }, { add(it) }).view)
+        sv.addView(PanelBody(this, s, { setTime() }, { add(it) }, addMode) { on ->
+            addMode = on
+            show(WidgetRenderer.snapshot(this))
+        }.view)
         card.addView(sv)
         scroll = sv
         sv.post { sv.scrollTo(0, y) }

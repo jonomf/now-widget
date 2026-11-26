@@ -73,6 +73,12 @@ object StoreSql {
     /** How many notes are bound to each link: more than one is "2 notes named 21H". */
     const val NOTES_PER_LINK = "SELECT link_id, COUNT(*) FROM vault_note WHERE link_id IS NOT NULL GROUP BY link_id"
 
+    /** Extra activities (schema v6). EXTRAS_FOR is followed by "(id, id, …)". */
+    const val EXTRA_ADD = "INSERT OR IGNORE INTO entry_activity (entry_id, activity_id) VALUES (?, ?)"
+    const val EXTRA_REMOVE = "DELETE FROM entry_activity WHERE entry_id = ? AND activity_id = ?"
+    const val DELETE_ENTRY_EXTRAS = "DELETE FROM entry_activity WHERE entry_id = ?"
+    const val EXTRAS_FOR = "SELECT entry_id, activity_id FROM entry_activity WHERE entry_id IN "
+
     /** Import dedupe: the note of the moment with this key, if any. */
     const val NOTE_AT_KEY = "SELECT text FROM moment WHERE source_key = ? LIMIT 1"
     const val KEY_TAKEN = "SELECT 1 FROM moment WHERE source_key = ? LIMIT 1"

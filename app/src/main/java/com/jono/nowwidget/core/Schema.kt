@@ -14,9 +14,11 @@ package com.jono.nowwidget.core
  * existing row keeps NULL, which means "just its activity".
  * Version 5 is three new tables for ranking people and places by his dated daily notes, and
  * changes nothing that exists.
+ * Version 6 is one new table, `entry_activity`: an entry's extra activities ("Eat + Family"); the
+ * primary stays entry.activity_id.
  */
 object Schema {
-    const val VERSION = 5
+    const val VERSION = 6
 
     /**
      * The version 1 tables as version 2 has them: build 6's DDL, plus entry.context_id at the end
@@ -96,6 +98,14 @@ object Schema {
     )
     // END NEW_IN_V5
 
+    /** Version 6: extra activities on an entry, besides its primary (they overlap: tags, not a split). */
+    // BEGIN NEW_IN_V6
+    val NEW_IN_V6: List<String> = listOf(
+        "CREATE TABLE entry_activity (entry_id INTEGER NOT NULL, activity_id INTEGER NOT NULL, PRIMARY KEY (entry_id, activity_id))",
+        "CREATE INDEX entry_activity_act ON entry_activity (activity_id)",
+    )
+    // END NEW_IN_V6
+
     /** Daylio's five default moods. Level 1 is the best. */
     // BEGIN SEED_MOODS
     val SEED_MOODS: List<String> = listOf(
@@ -122,7 +132,7 @@ object Schema {
     // END UPGRADE_1_2
 
     /** Everything a fresh install runs (activities are seeded separately, with colors). */
-    fun create(): List<String> = BASE + NEW_IN_V2 + NEW_IN_V3 + NEW_IN_V4 + NEW_IN_V5 + SEED_MOODS
+    fun create(): List<String> = BASE + NEW_IN_V2 + NEW_IN_V3 + NEW_IN_V4 + NEW_IN_V5 + NEW_IN_V6 + SEED_MOODS
 
     /** Version 1 to 2, in order. The helper runs this, then [upgradeFrom2], inside one transaction. */
     fun upgradeFrom1(): List<String> = NEW_IN_V2 + SEED_MOODS + UPGRADE_1_2
@@ -135,4 +145,7 @@ object Schema {
 
     /** Version 4 to 5. */
     fun upgradeFrom4(): List<String> = NEW_IN_V5
+
+    /** Version 5 to 6. */
+    fun upgradeFrom5(): List<String> = NEW_IN_V6
 }

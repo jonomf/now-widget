@@ -21,10 +21,21 @@ data class DaySpan(
     val running: Boolean = false,
     /** Free-written words ("fixing the bike"); [activity] is then its category. */
     val title: String? = null,
+    /** Extra activities at the same time ("Eat + Family"), in a stable order. */
+    val also: List<DayAct> = emptyList(),
 ) {
     /** What it was: the free-written title, else the activity's name. */
     val label: String get() = FreeWrite.clean(title) ?: activity
+
+    /** "🍽️ Eat + 🏡 Family": the primary (with its emoji) and every extra. */
+    val fullLabel: String get() {
+        val head = (if (emoji.isNotBlank()) emoji.trim() + " " else "") + label.trim()
+        return head + also.joinToString("") { a -> " + " + (if (a.emoji.isNotBlank()) a.emoji.trim() + " " else "") + a.name.trim() }
+    }
 }
+
+/** An extra activity of a span: its name, emoji and group. */
+data class DayAct(val id: Long, val name: String, val emoji: String = "", val group: String = "")
 
 /** A note or feeling, attached to an entry or on its own. */
 data class DayMoment(
@@ -118,7 +129,8 @@ object ObsidianDay {
     class Merged(var span: DaySpan, val entries: MutableSet<Long>)
 
     private fun sameThings(a: DaySpan, b: DaySpan): Boolean =
-        a.activityId == b.activityId && sameTitle(a.title, b.title) && a.people.toSet() == b.people.toSet() &&
+        a.activityId == b.activityId && sameTitle(a.title, b.title) && a.also.map { it.id }.toSet() == b.also.map { it.id }.toSet() &&
+            a.people.toSet() == b.people.toSet() &&
             a.places.toSet() == b.places.toSet() && a.context == b.context
 
     /** Both plain, or the same free-written title (any case). */
@@ -220,8 +232,7 @@ object ObsidianDay {
             sb.append(time(s.from, d.tz)).append('–')
             if (!s.running) sb.append(time(s.to, d.tz))
             sb.append(' ')
-            if (s.emoji.isNotBlank()) sb.append(s.emoji.trim()).append(' ')
-            sb.append(s.label)
+            sb.append(s.fullLabel)
             if (s.people.isNotEmpty()) sb.append(" w ").append(names(s.people.map { link(it, d.notes[it]) }))
             if (s.places.isNotEmpty()) sb.append(" at ").append(names(s.places.map { link(it, d.notes[it]) }))
             if (s.context != null && s.context != headContext) sb.append(" in ").append(link(s.context, d.notes[s.context]))
@@ -242,9 +253,11 @@ object ObsidianDay {
         items.sortedWith(compareBy<Item>({ it.time }, { it.order })).forEach { out.addAll(it.lines) }
 
         val totals = LinkedHashMap<String, Long>()
+        // Each group once per span, even when two of its activities are on it.
         d.spans.forEach { s ->
-            val g = s.group.ifBlank { s.activity }
-            totals[g] = (totals[g] ?: 0L) + (s.to - s.from)
+            (listOf(s.group.ifBlank { s.activity }) + s.also.map { it.group.ifBlank { it.name } }).toSet().forEach { g ->
+                totals[g] = (totals[g] ?: 0L) + (s.to - s.from)
+            }
         }
         if (totals.isNotEmpty()) {
             out.add("")

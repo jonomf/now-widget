@@ -196,6 +196,25 @@ def test_link_merge():
     check(db.execute(SQL['NOTES_PER_LINK']).fetchall() == [(1, 1)], 'notes per link')
 
 
+# --- Extra activities (schema v6) ---
+
+def test_extras():
+    db = fresh_v2()
+    db.execute('INSERT INTO entry (id, activity_id, start_ms) VALUES (1, 1, 100), (2, 3, 200)')
+    for args in ((1, 2), (1, 2), (1, 4), (2, 2)):
+        db.execute(SQL['EXTRA_ADD'], args)
+    got = sorted(db.execute(SQL['EXTRAS_FOR'] + '(1, 2)').fetchall())
+    check(got == [(1, 2), (1, 4), (2, 2)], 'extras once each, read for several entries: %r' % got)
+    db.execute(SQL['EXTRA_REMOVE'], (1, 4))
+    check(sorted(db.execute(SQL['EXTRAS_FOR'] + '(1)').fetchall()) == [(1, 2)], 'one extra removed')
+    # Deleting an entry takes its extras; another entry's stay.
+    db.execute('BEGIN')
+    for k in ('DETACH_MOMENTS', 'DELETE_ENTRY_LINKS', 'DELETE_ENTRY_EXTRAS', 'DELETE_ENTRY'):
+        db.execute(SQL[k], (1,))
+    db.execute('COMMIT')
+    check(db.execute('SELECT entry_id, activity_id FROM entry_activity').fetchall() == [(2, 2)], 'extras go with their entry')
+
+
 # --- Daylio import ---
 
 PREDEF = {1: 'rad', 2: 'good', 3: 'meh', 4: 'bad', 5: 'awful'}
@@ -551,6 +570,7 @@ def main():
     test_titles()
     test_mentions()
     test_link_merge()
+    test_extras()
     test_import()
     test_export_days()
     test_change_reach()
@@ -561,7 +581,7 @@ def main():
     test_alias_and_rename_sql()
     test_v2_links_stay_chips_after_a_scan()
     print(f'{len(failures)} failures' if failures else
-          f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; check-in flow defaults and uses; free-written titles; mention index; link merge; '
+          f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; check-in flow defaults and uses; free-written titles; mention index; link merge; extra activities; '
           'import dedupe (re-import, same-minute notes, native feelings); rollback on failure; '
           'export dirty days, change counters and hashes; change reach; calendar and Toggl records by day; areas; vault cache; alias binding and rename; v2 links stay chips')
     sys.exit(1 if failures else 0)

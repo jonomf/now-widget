@@ -165,6 +165,17 @@ fun Context.setChipOn(v: View, on: Boolean) {
     v.isSelected = on
 }
 
+/** An extra activity ("+ Family"): a lighter highlight than [setChipOn]'s, so the primary stands out. */
+fun Context.setChipLight(v: View) {
+    val accent = getColor(android.R.color.system_accent1_500)
+    v.background = GradientDrawable().apply {
+        cornerRadius = dp(16).toFloat()
+        setColor((accent and 0x00FFFFFF) or (0x22 shl 24))
+        setStroke(dp(1), (accent and 0x00FFFFFF) or (0x99 shl 24))
+    }
+    v.isSelected = true
+}
+
 /** Lays its children out left to right, wrapping onto new lines, like a row of chips. */
 class WrapLayout(ctx: Context) : ViewGroup(ctx) {
     private val gap = ctx.dp(6)

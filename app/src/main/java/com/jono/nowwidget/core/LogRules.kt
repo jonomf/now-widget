@@ -76,14 +76,15 @@ object LogRules {
     }
 
     /**
-     * True when the latest entry carries something you added by hand: a person or place, or a
+     * True when the latest entry carries something you added by hand: a person or place, an extra activity, or a
      * context other than the one it inherited. [inheritedContextId] is the context of the last
      * non-idle entry before it (what a new entry picks up on its own); [inheritedLinks] are the
      * place and people the check-in flow carried over on its own (the last place, the people
      * before), which don't count either.
      */
     fun marked(latest: Entry, inheritedContextId: Long?, inheritedLinks: Set<Long> = emptySet()): Boolean =
-        (latest.links - inheritedLinks).isNotEmpty() || (latest.contextId != null && latest.contextId != inheritedContextId)
+        (latest.links - inheritedLinks).isNotEmpty() || (latest.contextId != null && latest.contextId != inheritedContextId) ||
+            latest.extras.isNotEmpty() // "Eat + Family": the extras were added by hand
 
     /**
      * - A different activity: it starts now, and that ends the last one.

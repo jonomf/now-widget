@@ -9,7 +9,7 @@ import org.junit.Test
 class SchemaTest {
     @Test
     fun oneStatementPerString() {
-        (Schema.create() + Schema.upgradeFrom1() + Schema.upgradeFrom2() + Schema.upgradeFrom3() + Schema.upgradeFrom4()).forEach { s ->
+        (Schema.create() + Schema.upgradeFrom1() + Schema.upgradeFrom2() + Schema.upgradeFrom3() + Schema.upgradeFrom4() + Schema.upgradeFrom5()).forEach { s ->
             assertFalse(s, s.contains(";"))
             assertTrue(s, s.startsWith("CREATE") || s.startsWith("INSERT") || s.startsWith("ALTER"))
         }
@@ -26,12 +26,14 @@ class SchemaTest {
         assertEquals(listOf("ALTER TABLE entry ADD COLUMN title TEXT"), Schema.NEW_IN_V4)
         assertEquals(Schema.NEW_IN_V5, Schema.create().filter { it in Schema.NEW_IN_V5 })
         assertEquals(Schema.NEW_IN_V5, Schema.upgradeFrom4())
-        assertEquals(5, Schema.VERSION)
+        assertEquals(Schema.NEW_IN_V6, Schema.create().filter { it in Schema.NEW_IN_V6 })
+        assertEquals(Schema.NEW_IN_V6, Schema.upgradeFrom5())
+        assertEquals(6, Schema.VERSION)
     }
 
     @Test
     fun upgradeNeverDropsOrRewritesOldData() {
-        (Schema.upgradeFrom1() + Schema.upgradeFrom2() + Schema.upgradeFrom3() + Schema.upgradeFrom4()).forEach { s ->
+        (Schema.upgradeFrom1() + Schema.upgradeFrom2() + Schema.upgradeFrom3() + Schema.upgradeFrom4() + Schema.upgradeFrom5()).forEach { s ->
             val u = s.uppercase()
             assertFalse(s, u.startsWith("DROP") || u.startsWith("DELETE") || u.startsWith("UPDATE"))
             assertFalse(s, u.startsWith("INSERT INTO PERSON") || u.startsWith("INSERT INTO ENTRY "))

@@ -55,6 +55,8 @@ data class Entry(
     val contextId: Long? = null,
     /** Free-written words ("fixing the bike"): what it was, with [activityId] as its category. Null: just the activity. */
     val title: String? = null,
+    /** Extra activities besides [activityId] ("Eat + Family"): they overlap, each gets the whole time. */
+    val extras: Set<Long> = emptySet(),
 )
 
 /** An entry clipped to the time range that was asked for. */

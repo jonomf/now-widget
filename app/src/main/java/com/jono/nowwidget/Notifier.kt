@@ -9,6 +9,7 @@ import com.jono.nowwidget.core.CheckInFlow
 import com.jono.nowwidget.core.FlowCell
 import com.jono.nowwidget.core.FlowControl
 import com.jono.nowwidget.core.FlowState
+import com.jono.nowwidget.core.Together
 
 /**
  * The lock screen buttons. A notification works on every Android version, and its buttons run
@@ -36,7 +37,7 @@ object Notifier {
         // Where and who may show here (their names already do); how you feel never does: on the
         // feeling step the notification is back to the usual buttons.
         val flow = s.flow?.takeIf { CheckInFlow.onLockScreen(it) }
-        val title = s.act?.let { a -> a.emoji + " " + (if (flow != null) CheckInFlow.head(flow, s.name) else s.name) }
+        val title = s.act?.let { a -> if (flow != null) a.emoji + " " + CheckInFlow.head(flow, s.name) else Together.label(s.name, a.emoji, s.extras, emoji = true) }
             ?: "Nothing right now"
         val b = Notification.Builder(ctx, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat)
@@ -77,7 +78,7 @@ object Notifier {
         val rv = RemoteViews(ctx.packageName, R.layout.notif_collapsed)
         rv.removeAllViews(R.id.row)
         s.picks(Prefs.lockButtons(ctx)).forEach { a ->
-            rv.addView(R.id.row, WidgetRenderer.slot(ctx, R.layout.slot, a, a.id == s.act?.id))
+            rv.addView(R.id.row, WidgetRenderer.slot(ctx, R.layout.slot, a, a.id == s.act?.id, extra = s.extras.any { it.id == a.id }))
         }
         return rv
     }

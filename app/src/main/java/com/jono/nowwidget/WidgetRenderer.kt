@@ -35,6 +35,7 @@ import com.jono.nowwidget.core.LogRules
 import com.jono.nowwidget.core.Mentions
 import com.jono.nowwidget.core.PlannedNudge
 import com.jono.nowwidget.core.StartShift
+import com.jono.nowwidget.core.Together
 import java.util.concurrent.CopyOnWriteArraySet
 
 /** Everything a redraw needs, loaded once and shared by every layout and the notification. */
@@ -54,7 +55,9 @@ class Snapshot(
     val curHasMoments: Boolean,
     val scores: Map<Long, Double>,
     val smart: Boolean,
+    /** Today per activity, each with its full time (overlapping activities count fully). */
     val today: List<Pair<Act, Long>>,
+    /** Today's clock time, once. */
     val todayTotal: Long,
     val sinceText: String,
     val idleSince: Long?,
@@ -76,6 +79,10 @@ class Snapshot(
     val shiftNote: String? = null,
     val prevLength: String? = null,
     val startInFlow: Boolean = true,
+    /** Today by primary activity only: the split bar, which adds up to [todayTotal]. */
+    val todayPrimary: List<Pair<Act, Long>> = emptyList(),
+    /** The current entry's extra activities ("Eat + Family"). */
+    val extras: List<Act> = emptyList(),
 ) {
     /** What you're doing, by name: a free-written title, else the activity's name. */
     val name: String get() = FreeWrite.name(cur?.title, act)
@@ -177,11 +184,12 @@ object WidgetRenderer {
         val idle = Store.idleSince(ctx)
         val links = Store.allLinks(ctx)
         val spans = Store.spans(ctx, Fmt.today(), now)
-        val totals = HashMap<Long, Long>()
-        spans.forEach { totals[it.entry.activityId] = (totals[it.entry.activityId] ?: 0L) + it.ms }
-        val today = totals.entries
-            .mapNotNull { (id, ms) -> byId[id]?.let { it to ms } }
-            .sortedByDescending { it.second }
+        // "Eat + Family": each activity gets the whole time (the breakdown); the clock time and the
+        // split bar count it once, by the primary.
+        fun list(m: Map<Long, Long>) = m.entries.mapNotNull { (id, ms) -> byId[id]?.let { it to ms } }.sortedByDescending { it.second }
+        val today = list(Together.activityTotals(spans))
+        val primaryToday = HashMap<Long, Long>()
+        spans.forEach { primaryToday[it.entry.activityId] = (primaryToday[it.entry.activityId] ?: 0L) + it.ms }
         val buttons = acts.filter { it.show && !it.archived }
         val flow = CheckIn.current(ctx, cur, links, now)
         // People and places everywhere: Now use ×3 plus the vault's mentions, then name (the flow's
@@ -210,7 +218,9 @@ object WidgetRenderer {
             scores = Store.scores(ctx, now),
             smart = Prefs.smartOrder(ctx),
             today = today,
-            todayTotal = today.sumOf { it.second },
+            todayTotal = Together.clockTotal(spans),
+            todayPrimary = list(primaryToday),
+            extras = cur?.let { c -> Together.acts(c).drop(1).mapNotNull { byId[it] } } ?: emptyList(),
             sinceText = (cur?.start ?: idle)?.let { Fmt.since(ctx, it) } ?: "",
             idleSince = idle,
             nudge = nudge(ctx, now, buttons, byId),
@@ -268,7 +278,7 @@ object WidgetRenderer {
 
     fun buildPanel(ctx: Context, s: Snapshot): RemoteViews {
         val rv = RemoteViews(ctx.packageName, R.layout.widget_block)
-        head(ctx, rv, s, showSince = true, withTotal = true, withPlace = true, withContext = true)
+        head(ctx, rv, s, showSince = true, withTotal = true, withPlace = true, withContext = true, nameChars = 40)
         rv.setOnClickPendingIntent(R.id.head, openApp(ctx))
         bar(rv, barBitmap(s))
         startedRow(ctx, rv, R.id.started_box, s, StartedMode.PANEL)
@@ -297,7 +307,7 @@ object WidgetRenderer {
     private fun fill(ctx: Context, k: Kind, s: Snapshot, barBmp: Bitmap?): RemoteViews {
         val rv = RemoteViews(ctx.packageName, k.layout)
         val isBlock = k.layout == R.layout.widget_block
-        head(ctx, rv, s, showSince = k != Kind.TILE, withTotal = isBlock, withPlace = k.placeInHead,
+        head(ctx, rv, s, showSince = k != Kind.TILE, withTotal = isBlock, withPlace = k.placeInHead, nameChars = nameChars(k),
             withContext = k.contextInHead)
         rv.setOnClickPendingIntent(R.id.head, if (k.expands) openPanel(ctx) else openApp(ctx))
         // Block sizes: the elapsed timer opens the panel, where the Started row is.
@@ -571,6 +581,8 @@ object WidgetRenderer {
         withTotal: Boolean,
         withPlace: Boolean,
         withContext: Boolean = false,
+        /** Room in the head for "Eat + Family"; less, and it's "Eat +1". */
+        nameChars: Int = 24,
     ) {
         val cur = s.cur
         val act = s.act
@@ -579,7 +591,7 @@ object WidgetRenderer {
             if (cur == null) R.drawable.widget_bg_idle else R.drawable.widget_bg)
         rv.setTextViewText(R.id.cur_emoji, act?.emoji ?: "⭕")
         // A free-written entry goes by its own words; its category's emoji stays beside them.
-        rv.setTextViewText(R.id.cur_name, if (cur == null) "Nothing" else s.name)
+        rv.setTextViewText(R.id.cur_name, if (cur == null) "Nothing" else Together.short(s.name, s.extras, nameChars))
         val since = cur?.start ?: s.idleSince
         if (since != null) {
             rv.setViewVisibility(R.id.cur_elapsed, View.VISIBLE)
@@ -639,7 +651,7 @@ object WidgetRenderer {
         val canvas = Canvas(bmp)
         val paint = Paint()
         var x = 0f
-        s.today.forEach { (a, ms) ->
+        s.todayPrimary.forEach { (a, ms) ->
             paint.color = a.color
             val seg = w.toFloat() * ms.toFloat() / s.todayTotal.toFloat()
             canvas.drawRect(x, 0f, x + seg, h.toFloat(), paint)
@@ -667,7 +679,8 @@ object WidgetRenderer {
         cells.chunked(cols).forEach { chunk ->
             val row = RemoteViews(ctx.packageName, rowLayout)
             chunk.forEach { a ->
-                row.addView(R.id.row, if (a == null) plusSlot(ctx, slotLayout) else slot(ctx, slotLayout, a, a.id == s.act?.id))
+                row.addView(R.id.row, if (a == null) plusSlot(ctx, slotLayout) else
+                    slot(ctx, slotLayout, a, a.id == s.act?.id, extra = s.extras.any { it.id == a.id }))
             }
             repeat(cols - chunk.size) {
                 val filler = RemoteViews(ctx.packageName, slotLayout)
@@ -691,14 +704,23 @@ object WidgetRenderer {
         return v
     }
 
-    fun slot(ctx: Context, layout: Int, a: Act, on: Boolean): RemoteViews {
+    /** How long "Eat + Family" may be in each size's head (the 1×1 shows "Eat +1"). */
+    private fun nameChars(k: Kind): Int = when {
+        k == Kind.TILE -> 0
+        k.layout == R.layout.widget_strip -> (k.headDp / 7f).toInt()
+        else -> (k.size.width / 8f).toInt()
+    }
+
+    /** [extra]: one of the current entry's extra activities, a lighter highlight than the primary's. */
+    fun slot(ctx: Context, layout: Int, a: Act, on: Boolean, extra: Boolean = false): RemoteViews {
         val v = RemoteViews(ctx.packageName, layout)
         v.setViewVisibility(R.id.slot_root, View.VISIBLE)
         v.setTextViewText(R.id.slot_emoji, a.emoji)
         v.setViewVisibility(R.id.slot_emoji, View.VISIBLE)
         v.setTextViewText(R.id.slot_label, a.name)
         v.setViewVisibility(R.id.slot_label, View.VISIBLE)
-        v.setInt(R.id.slot_root, "setBackgroundResource", if (on) R.drawable.slot_on else R.drawable.slot_off)
+        v.setInt(R.id.slot_root, "setBackgroundResource",
+            if (on) R.drawable.slot_on else if (extra) R.drawable.slot_extra else R.drawable.slot_off)
         v.setOnClickPendingIntent(R.id.slot_root, NowWidget.tapIntent(ctx, a.id))
         return v
     }

@@ -43,6 +43,7 @@ import com.jono.nowwidget.core.StartShift
 import com.jono.nowwidget.core.StoreSql
 import com.jono.nowwidget.core.Span
 import com.jono.nowwidget.core.TagTarget
+import com.jono.nowwidget.core.Together
 import com.jono.nowwidget.core.TogglRecord
 import com.jono.nowwidget.core.TogglRecordCodec
 import com.jono.nowwidget.core.VaultNote
@@ -101,6 +102,7 @@ private class Helper(ctx: Context) : SQLiteOpenHelper(ctx, "now.db", null, Schem
         if (oldVersion < 3) Schema.upgradeFrom2().forEach { db.execSQL(it) }
         if (oldVersion < 4) Schema.upgradeFrom3().forEach { db.execSQL(it) }
         if (oldVersion < 5) Schema.upgradeFrom4().forEach { db.execSQL(it) }
+        if (oldVersion < 6) Schema.upgradeFrom5().forEach { db.execSQL(it) }
     }
 }
 
@@ -443,7 +445,7 @@ object Store {
             "SELECT $ENTRY_COLS FROM entry ORDER BY start_ms DESC, id DESC LIMIT 1",
             null,
         ).use { c -> if (c.moveToFirst()) readEntry(c) else null } ?: return null
-        return e.copy(links = linksFor(ctx, listOf(e.id))[e.id] ?: emptySet())
+        return e.copy(links = linksFor(ctx, listOf(e.id))[e.id] ?: emptySet(), extras = extrasFor(ctx, listOf(e.id))[e.id] ?: emptySet())
     }
 
     private fun before(ctx: Context, e: Entry): Entry? =
@@ -510,6 +512,8 @@ object Store {
                     if (at != null) {
                         val id = insert(ctx, activityId, at, cur.contextId)
                         writeLinks(ctx, id, cur.links)
+                        // Its extras stay with it too (the new primary isn't one of them).
+                        writeExtras(ctx, id, cur.extras - activityId)
                         id.takeIf { activityId != IDLE }
                     } else null
                 }
@@ -967,15 +971,19 @@ object Store {
         startOf(ctx, entryId)?.let { dirtyAround(ctx, it) }
     }
 
-    fun addEntry(ctx: Context, activityId: Long, start: Long, links: Set<Long>, contextId: Long?, title: String? = null) {
+    fun addEntry(ctx: Context, activityId: Long, start: Long, links: Set<Long>, contextId: Long?, title: String? = null, extras: Set<Long> = emptySet()) {
         tx(ctx) {
             val id = insert(ctx, activityId, start, contextId, title)
             writeLinks(ctx, id, links)
+            writeExtras(ctx, id, extras - activityId)
         }
     }
 
     /** [title] null or blank makes it a plain entry of its activity again. Marks every export dirty, like any edit. */
-    fun updateEntry(ctx: Context, id: Long, activityId: Long, start: Long, links: Set<Long>, contextId: Long?, title: String? = null) {
+    fun updateEntry(
+        ctx: Context, id: Long, activityId: Long, start: Long, links: Set<Long>, contextId: Long?, title: String? = null,
+        extras: Set<Long>? = null,
+    ) {
         tx(ctx) { d ->
             val old = startOf(ctx, id)
             val t = FreeWrite.clean(title)
@@ -987,6 +995,9 @@ object Store {
             }
             d.update("entry", v, "id=?", args(id))
             writeLinks(ctx, id, links)
+            // null leaves them; the primary is never also an extra.
+            val ex = extras ?: (extrasFor(ctx, listOf(id))[id] ?: emptySet())
+            writeExtras(ctx, id, ex - activityId)
             // Both the old place in the day and the new one: a move across days marks both.
             if (old != null) dirtyAround(ctx, old)
             dirtyAround(ctx, start)
@@ -1010,6 +1021,7 @@ object Store {
             val old = startOf(ctx, id)
             d.execSQL(StoreSql.DETACH_MOMENTS, arrayOf<Any>(id))
             d.execSQL(StoreSql.DELETE_ENTRY_LINKS, arrayOf<Any>(id))
+            d.execSQL(StoreSql.DELETE_ENTRY_EXTRAS, arrayOf<Any>(id))
             d.execSQL(StoreSql.DELETE_ENTRY, arrayOf<Any>(id))
             if (old != null) dirtyAround(ctx, old)
         }
@@ -1019,6 +1031,44 @@ object Store {
         db(ctx).rawQuery("SELECT start_ms FROM entry WHERE id = ?", args(entryId)).use { c ->
             if (c.moveToFirst()) c.getLong(0) else null
         }
+
+    /** Each entry's extra activities ("Eat + Family"), in chunks so a long history stays within SQLite's limits. */
+    private fun extrasFor(ctx: Context, ids: List<Long>): Map<Long, Set<Long>> {
+        if (ids.isEmpty()) return emptyMap()
+        val out = HashMap<Long, MutableSet<Long>>()
+        ids.chunked(500).forEach { chunk ->
+            db(ctx).rawQuery(StoreSql.EXTRAS_FOR + "(" + chunk.joinToString(",") + ")", null).use { c ->
+                while (c.moveToNext()) out.getOrPut(c.getLong(0)) { HashSet() }.add(c.getLong(1))
+            }
+        }
+        return out
+    }
+
+    /**
+     * Add mode in the panel: [act] on or off as an extra of entry [entryId] ([Together.toggle]; the
+     * primary stays). Marks the day dirty for every export.
+     */
+    fun toggleExtra(ctx: Context, entryId: Long, act: Long) {
+        val e = (latest(ctx)?.takeIf { it.id == entryId }) ?: return
+        val next = Together.toggle(e, act)
+        if (next == e.extras) return
+        setExtras(ctx, entryId, next)
+    }
+
+    /** Sets entry [entryId]'s extras to exactly [extras] (its primary is never one). */
+    fun setExtras(ctx: Context, entryId: Long, extras: Set<Long>) {
+        val primary = db(ctx).rawQuery("SELECT activity_id FROM entry WHERE id = ?", args(entryId)).use { c ->
+            if (c.moveToFirst()) c.getLong(0) else null
+        } ?: return
+        tx(ctx) { writeExtras(ctx, entryId, extras - primary) }
+        startOf(ctx, entryId)?.let { dirtyAround(ctx, it) }
+    }
+
+    private fun writeExtras(ctx: Context, entryId: Long, extras: Set<Long>) {
+        val d = db(ctx)
+        d.execSQL(StoreSql.DELETE_ENTRY_EXTRAS, arrayOf<Any>(entryId))
+        extras.filter { it != IDLE }.forEach { d.execSQL(StoreSql.EXTRA_ADD, arrayOf<Any>(entryId, it)) }
+    }
 
     private fun linksFor(ctx: Context, ids: List<Long>): Map<Long, Set<Long>> {
         if (ids.isEmpty()) return emptyMap()
@@ -1044,7 +1094,8 @@ object Store {
             while (c.moveToNext()) rows.add(readEntry(c))
         }
         val links = linksFor(ctx, rows.map { it.id })
-        return LogRules.spans(rows.map { it.copy(links = links[it.id] ?: emptySet()) }, from, to, System.currentTimeMillis())
+        val extras = extrasFor(ctx, rows.map { it.id })
+        return LogRules.spans(rows.map { it.copy(links = links[it.id] ?: emptySet(), extras = extras[it.id] ?: emptySet()) }, from, to, System.currentTimeMillis())
     }
 
     // --- Moments: notes and feelings ---

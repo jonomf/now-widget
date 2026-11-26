@@ -23,6 +23,7 @@ import com.jono.nowwidget.core.Daylio
 import com.jono.nowwidget.core.DiaryDay
 import com.jono.nowwidget.core.LinkKind
 import com.jono.nowwidget.core.StartShift
+import com.jono.nowwidget.core.Together
 import com.jono.nowwidget.core.levelFace
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -313,9 +314,10 @@ class MainActivity : Activity() {
             )
         }
 
-        val total = spans.sumOf { it.ms }
-        val byAct = HashMap<Long, Long>()
-        val byGroup = HashMap<String, Long>()
+        // "Eat + Family": each activity gets the whole time; the clock time counts once.
+        val total = Together.clockTotal(spans)
+        val byAct = HashMap(Together.activityTotals(spans))
+        val byGroup = HashMap(Together.groupTotals(spans, { acts[it]?.group }))
         val groupColor = HashMap<String, Int>()
         val byPerson = HashMap<Long, Long>()
         val byPlace = HashMap<Long, Long>()
@@ -323,16 +325,16 @@ class MainActivity : Activity() {
         val byTitle = HashMap<Long, LinkedHashMap<String, Pair<String, Long>>>()
         spans.forEach { s ->
             val a = acts[s.entry.activityId]
-            byAct[s.entry.activityId] = (byAct[s.entry.activityId] ?: 0L) + s.ms
             s.entry.title?.let { t ->
                 val m = byTitle.getOrPut(s.entry.activityId) { LinkedHashMap() }
                 val k = t.lowercase()
                 val have = m[k]
                 m[k] = (have?.first ?: t) to ((have?.second ?: 0L) + s.ms)
             }
-            val g = a?.group?.ifBlank { "Ungrouped" } ?: "Ungrouped"
-            byGroup[g] = (byGroup[g] ?: 0L) + s.ms
-            if (a != null && g !in groupColor) groupColor[g] = a.color
+            Together.acts(s.entry).mapNotNull { acts[it] }.forEach { x ->
+                val g = x.group.ifBlank { "Ungrouped" }
+                if (g !in groupColor) groupColor[g] = x.color
+            }
             s.entry.links.forEach { id ->
                 when (links[id]?.kind) {
                     LinkKind.PERSON -> {
@@ -345,6 +347,7 @@ class MainActivity : Activity() {
             }
         }
 
+        if (Together.overlaps(spans)) stats.addView(note("Overlapping activities each count fully."))
         byAct.entries.sortedByDescending { it.value }.forEach { (id, ms) ->
             val a = acts[id]
             stats.addView(statRow(if (a != null) a.emoji + " " + a.name else "Removed", ms, total, a?.color ?: GREY))
@@ -484,7 +487,8 @@ class MainActivity : Activity() {
             if (e != null && m.text.isNotBlank()) texts.getOrPut(e) { ArrayList() }.add(m.text)
         }
         // title (free-written words) is last, so readers of the older columns are unaffected; activity is its category.
-        val sb = StringBuilder("start,end,minutes,activity,group,people,note,place,title\n")
+        // also: the extra activities ("Eat + Family"), each also counting the whole span.
+        val sb = StringBuilder("start,end,minutes,activity,group,people,note,place,title,also\n")
         Store.spans(this, 0L, System.currentTimeMillis()).forEach { s ->
             val a = acts[s.entry.activityId]
             val linked = s.entry.links.mapNotNull { links[it] }
@@ -495,6 +499,7 @@ class MainActivity : Activity() {
                 texts[s.entry.id].orEmpty().joinToString("\n"),
                 linked.filter { it.kind == LinkKind.PLACE }.joinToString("; ") { it.title },
                 s.entry.title ?: "",
+                Together.acts(s.entry).drop(1).mapNotNull { acts[it]?.name }.joinToString("; "),
             )
             sb.append(Csv.line(fields)).append('\n')
         }

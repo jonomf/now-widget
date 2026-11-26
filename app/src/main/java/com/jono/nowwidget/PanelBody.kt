@@ -11,6 +11,7 @@ import com.jono.nowwidget.core.Moment
 import com.jono.nowwidget.core.PanelSections
 import com.jono.nowwidget.core.PanelSections.Section
 import com.jono.nowwidget.core.StartShift
+import com.jono.nowwidget.core.Together
 
 /**
  * The expand panel's sections, top to bottom, as ordinary views (so they scroll):
@@ -27,6 +28,9 @@ class PanelBody(
     private val s: Snapshot,
     private val setTime: () -> Unit,
     private val addLink: (String) -> Unit,
+    /** "Tap to: Switch · Add": in Add mode an activity tap adds or removes it as an extra. */
+    private val addMode: Boolean = false,
+    private val setAddMode: (Boolean) -> Unit = {},
 ) {
     val view: LinearLayout = LinearLayout(a).apply {
         orientation = LinearLayout.VERTICAL
@@ -64,7 +68,8 @@ class PanelBody(
             line("⭕ Nothing", 20f)
             if (s.sinceText.isNotBlank()) line(s.sinceText, 13f, 0.7f)
         } else {
-            line((act?.emoji ?: "") + " " + s.name, 20f)
+            // "🍽️ Eat + 🏡 Family"
+            line(Together.label(s.name, act?.emoji ?: "", s.extras, emoji = true), 20f)
             val parts = listOfNotNull(
                 if (cur.title != null) act?.name else null,
                 Fmt.dur(s.now - cur.start),
@@ -72,14 +77,46 @@ class PanelBody(
                 s.shiftNote,
             )
             line(parts.joinToString(" · "), 13f, 0.7f)
+            // "Also doing": each extra with ✕ to take it off.
+            if (s.extras.isNotEmpty()) {
+                val also = wrap()
+                also.addView(TextView(a).apply {
+                    text = "Also doing"
+                    textSize = 13f
+                    alpha = 0.7f
+                })
+                s.extras.forEach { x ->
+                    also.addView(a.chip(x.emoji + " " + x.name + "  ✕", false) {
+                        Store.toggleExtra(a, cur.id, x.id)
+                        changed()
+                    }.apply { a.setChipLight(this) })
+                }
+            }
             started(cur.id)
+            // Tap to: Switch (the default) · Add (several at once).
+            val mode = wrap()
+            mode.addView(TextView(a).apply {
+                text = "Tap to:"
+                textSize = 13f
+                alpha = 0.7f
+            })
+            mode.addView(a.chip("Switch", !addMode) { setAddMode(false) })
+            mode.addView(a.chip("Add", addMode) { setAddMode(true) })
         }
         val grid = wrap()
+        val adding = addMode && cur != null
+        val extraIds = s.extras.map { it.id }.toSet()
         s.picks(29).forEach { b ->
-            grid.addView(a.chip(b.emoji + " " + b.name, b.id == s.act?.id) {
-                Store.tap(a, b.id)?.let { CheckIn.start(a, it) }
+            val primary = b.id == s.act?.id
+            grid.addView(a.chip(b.emoji + " " + b.name, primary) {
+                if (adding && cur != null) {
+                    // Add mode: on or off as an extra; the primary stays.
+                    if (!primary) Store.toggleExtra(a, cur.id, b.id)
+                } else {
+                    Store.tap(a, b.id)?.let { CheckIn.start(a, it) }
+                }
                 changed()
-            })
+            }.apply { if (!primary && b.id in extraIds) a.setChipLight(this) })
         }
         grid.addView(a.chip("＋ Write", false) {
             a.startActivity(Intent(a, FreeWriteActivity::class.java))

@@ -125,16 +125,17 @@ object TogglDay {
      * then ` — ` and the moments' words joined with ` / `, kept under [MAX_DESCRIPTION].
      */
     fun description(s: DaySpan, moments: List<DayMoment>, notes: Boolean, checkIns: Boolean): String {
-        val head = (s.emoji.trim() + " " + s.label.trim()).trim()
+        // "🍽️ Eat + Family": the primary (the project) and the extras by name (they're tags too).
+        val head = ((s.emoji.trim() + " " + s.label.trim()).trim() + s.also.joinToString("") { " + " + it.name.trim() }).trim()
         val parts = moments.sortedBy { it.ts }.mapNotNull { momentPart(it, notes, checkIns) }
         val text = if (parts.isEmpty()) head else head + " — " + parts.joinToString(" / ")
         return truncate(text, MAX_DESCRIPTION)
     }
 
-    /** People, places and context as tag names (blanks and repeats dropped), then `now`. */
+    /** Extra activities, people, places and context as tag names (blanks and repeats dropped), then `now`. */
     fun tags(s: DaySpan): List<String> {
         val names = ArrayList<String>()
-        (s.people + s.places + listOfNotNull(s.context)).forEach { n ->
+        (s.also.map { it.name } + s.people + s.places + listOfNotNull(s.context)).forEach { n ->
             val t = truncate(oneLine(n), MAX_TAG)
             if (t.isNotEmpty() && names.none { it.equals(t, ignoreCase = true) } && !t.equals(TAG_NOW, ignoreCase = true)) names.add(t)
         }

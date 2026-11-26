@@ -131,8 +131,7 @@ object CalendarDay {
     /** `🎨 Hobby · Sam, Dulce @ Tartine` (a free-written title in place of the activity): people and place when there are any, kept short. */
     fun title(s: DaySpan): String {
         val sb = StringBuilder()
-        if (s.emoji.isNotBlank()) sb.append(s.emoji.trim()).append(' ')
-        sb.append(s.label.trim())
+        sb.append(s.fullLabel)
         val people = s.people.map { it.trim() }.filter { it.isNotEmpty() }
         if (people.isNotEmpty()) {
             sb.append(" · ").append(people.take(MAX_PEOPLE).joinToString(", "))

@@ -28,6 +28,7 @@ import com.jono.nowwidget.core.LinkKind
 import com.jono.nowwidget.core.Moment
 import com.jono.nowwidget.core.Mood
 import com.jono.nowwidget.core.Span
+import com.jono.nowwidget.core.Together
 import java.util.Calendar
 
 /**
@@ -318,7 +319,8 @@ class TimelineActivity : Activity() {
             setPadding(0, dp(10), 0, dp(4))
             setOnClickListener { edit(s.entry) }
             addView(TextView(this@TimelineActivity).apply {
-                text = if (a != null) a.emoji + " " + FreeWrite.name(s.entry.title, a) else FreeWrite.name(s.entry.title, null)
+                text = if (a != null) Together.label(FreeWrite.name(s.entry.title, a), a.emoji, Together.acts(s.entry).drop(1).mapNotNull { acts[it] }, emoji = true)
+                    else FreeWrite.name(s.entry.title, null)
                 textSize = 16f
             })
             addView(TextView(this@TimelineActivity).apply {
@@ -400,6 +402,20 @@ class TimelineActivity : Activity() {
             setText(entry?.title ?: "")
         }
         box.addView(titleField)
+
+        // "Eat + Family": other activities at the same time. Each counts the whole time in the stats.
+        box.addView(label("Also doing"))
+        val alsoChecks = ArrayList<Pair<Long, CheckBox>>()
+        val alsoBox = WrapLayout(this)
+        acts.filter { !it.archived || (entry != null && it.id in entry.extras) }.forEach { a ->
+            val cb = CheckBox(this).apply {
+                text = a.emoji + " " + a.name
+                isChecked = entry != null && a.id in entry.extras
+            }
+            alsoChecks.add(a.id to cb)
+            alsoBox.addView(cb)
+        }
+        box.addView(alsoBox)
         val oldTitle = entry?.title
         var shown: AlertDialog? = null
         if (oldTitle != null && Store.titleCount(this, oldTitle) >= FreeWrite.MAKE_ACTIVITY_AT) {
@@ -489,10 +505,11 @@ class TimelineActivity : Activity() {
                 val chosen = checks.filter { it.second.isChecked }.map { it.first }.toSet()
                 val ctxId = contextItems.getOrNull(contextSpinner.selectedItemPosition - 1)?.id
                 val title = FreeWrite.clean(titleField.text.toString())
+                val also = alsoChecks.filter { it.second.isChecked }.map { it.first }.toSet() - act
                 if (entry == null) {
-                    Store.addEntry(this, act, start, chosen, ctxId, title)
+                    Store.addEntry(this, act, start, chosen, ctxId, title, also)
                 } else {
-                    Store.updateEntry(this, entry.id, act, start, chosen, ctxId, title)
+                    Store.updateEntry(this, entry.id, act, start, chosen, ctxId, title, also)
                 }
                 changed()
             }
