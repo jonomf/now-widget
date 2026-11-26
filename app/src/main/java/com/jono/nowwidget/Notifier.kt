@@ -44,7 +44,6 @@ object Notifier {
             .setSubText(title)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setSilent(true)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setCategory(Notification.CATEGORY_STATUS)
             .setContentIntent(WidgetRenderer.openApp(ctx))
