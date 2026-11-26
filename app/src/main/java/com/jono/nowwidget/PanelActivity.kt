@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.text.format.DateFormat
 import android.view.Gravity
 import android.widget.FrameLayout
+import android.widget.ScrollView
 import com.jono.nowwidget.core.FlowStep
 import com.jono.nowwidget.core.FreeWrite
 import com.jono.nowwidget.core.FlowTap
@@ -16,15 +17,12 @@ import java.util.Calendar
 import kotlin.math.min
 
 /**
- * The expand panel: tap a small widget and this floats over the home screen with every button.
- * Picking a different activity closes it, unless that starts the check-in flow (where / who /
- * feeling): then the panel shows the flow and closes when it's done. Tap outside to close.
+ * The expand panel: tap a small widget and this floats over the home screen. It shows what you're
+ * doing in sections (Doing, At, With, Feeling; see [PanelBody]) that scroll, or, while the check-in
+ * flow runs, the flow itself (the widget's own RemoteViews, at full size). Tap outside to close.
  */
 class PanelActivity : Activity() {
     private lateinit var card: FrameLayout
-    private var openedOn: Long? = null
-    /** The flow showed here: when it ends, the panel's job is done. */
-    private var flowSeen = false
     /** A ＋ was tapped: the flow step's or the link kind's picker opens once the panel shows. */
     private var pendingFind: String? = null
     private var pendingAdd: String? = null
@@ -59,7 +57,6 @@ class PanelActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        openedOn = Store.current(this)?.activityId
         WidgetRenderer.listeners.add(redraw)
         if (!render()) {
             finish()
@@ -161,21 +158,11 @@ class PanelActivity : Activity() {
         finish() // opening the app from the panel closes it
     }
 
-    private fun onChanged() {
-        val s = WidgetRenderer.snapshot(this)
-        if (s.flow != null) {
-            openedOn = s.cur?.activityId
-            show(s)
-            return
-        }
-        if (s.cur?.activityId != openedOn || flowSeen) finish() else show(s)
-    }
+    /** Something changed: the flow, or the sections (which stay open: they're for setting things). */
+    private fun onChanged() = show(WidgetRenderer.snapshot(this))
 
-    /** False when there's nothing to show any more (the flow it was opened for has ended). */
     private fun render(): Boolean {
-        val s = WidgetRenderer.snapshot(this)
-        if (s.flow == null && flowSeen) return false
-        show(s)
+        show(WidgetRenderer.snapshot(this))
         return true
     }
 
@@ -188,10 +175,23 @@ class PanelActivity : Activity() {
         const val EXTRA_SET_TIME = "set_time"
     }
 
+    private var scroll: ScrollView? = null
+
     private fun show(s: Snapshot) {
         if (isFinishing) return
-        if (s.flow != null) flowSeen = true
+        val y = scroll?.scrollY ?: 0
         card.removeAllViews()
-        card.addView(WidgetRenderer.buildPanel(this, s).apply(this, card))
+        if (s.flow != null) {
+            scroll = null
+            card.addView(WidgetRenderer.buildPanel(this, s).apply(this, card))
+            return
+        }
+        // The sections: ordinary views, so the panel can scroll when it's taller than the screen.
+        val sv = ScrollView(this).apply { setBackgroundResource(R.drawable.widget_bg) }
+        sv.addView(PanelBody(this, s, { setTime() }, { add(it) }).view)
+        card.addView(sv)
+        scroll = sv
+        sv.post { sv.scrollTo(0, y) }
     }
+
 }
