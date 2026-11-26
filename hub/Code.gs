@@ -38,7 +38,7 @@ function doPost(e) {
       const now = new Date();
       const rows = push
         .filter(r => r && r.id && r.k)
-        .map(r => [now, String(r.dev || req.dev || ''), String(r.id), String(r.k), Number(r.v || 0), r.del ? 1 : 0, JSON.stringify(r)]);
+        .map(r => [now, String(r.dev || req.dev || ''), String(r.id), String(r.k), Number(r.v || 0), r.del ? 1 : 0, fit(r)]);
       if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, HEADER.length).setValues(rows);
     }
 
@@ -91,6 +91,16 @@ function logSheet() {
     sh.setFrozenRows(1);
   }
   return sh;
+}
+
+/** A sheet cell holds at most 50,000 characters: a very long note is cut to fit rather than blocking the sync. */
+function fit(r) {
+  let s = JSON.stringify(r);
+  if (s.length > 49000 && typeof r.text === 'string') {
+    r.text = r.text.slice(0, Math.max(0, r.text.length - (s.length - 48000))) + ' …';
+    s = JSON.stringify(r);
+  }
+  return s;
 }
 
 function reply(o) {
