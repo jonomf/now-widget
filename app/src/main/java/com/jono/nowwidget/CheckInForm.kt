@@ -176,7 +176,7 @@ class LinkRow(private val a: Activity, private val kind: String, title: String, 
 
     private fun draw() {
         wrap.removeAllViews()
-        Store.allLinks(a).filter { it.id == selected || (it.kind == kind && it.chip && !it.archived) }.forEach { l ->
+        Store.rankLinks(a, Store.allLinks(a).filter { it.id == selected || (it.kind == kind && it.chip && !it.archived) }).forEach { l ->
             wrap.addView(a.chip(l.label, l.id == selected) {
                 selected = if (selected == l.id) null else l.id
                 touched = true

@@ -12,9 +12,11 @@ package com.jono.nowwidget.core
  * Version 3 is three new tables for the Obsidian vault index and changes nothing that exists.
  * Version 4 adds one nullable column, `entry.title` (a free-written activity's own words); every
  * existing row keeps NULL, which means "just its activity".
+ * Version 5 is three new tables for ranking people and places by his dated daily notes, and
+ * changes nothing that exists.
  */
 object Schema {
-    const val VERSION = 4
+    const val VERSION = 5
 
     /**
      * The version 1 tables as version 2 has them: build 6's DDL, plus entry.context_id at the end
@@ -79,6 +81,21 @@ object Schema {
     )
     // END NEW_IN_V4
 
+    /**
+     * Version 5. `day_note` is a cache of the dated daily notes read (one row per file, so only new
+     * or changed ones are read again); `mention` is what each one says about each link target (by
+     * its lowercased name: `spelled` as written, `at_count` / `w_count` 1 when it came after "At" /
+     * in a "w" clause); `vault_rank` is the resulting mention score per link, worked out at each scan.
+     */
+    // BEGIN NEW_IN_V5
+    val NEW_IN_V5: List<String> = listOf(
+        "CREATE TABLE day_note (doc_id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, modified INTEGER NOT NULL DEFAULT 0, day INTEGER NOT NULL)",
+        "CREATE TABLE mention (doc_id TEXT NOT NULL, target TEXT NOT NULL, spelled TEXT NOT NULL, day INTEGER NOT NULL, at_count INTEGER NOT NULL DEFAULT 0, w_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (doc_id, target))",
+        "CREATE INDEX mention_target ON mention (target)",
+        "CREATE TABLE vault_rank (link_id INTEGER PRIMARY KEY NOT NULL, score REAL NOT NULL DEFAULT 0)",
+    )
+    // END NEW_IN_V5
+
     /** Daylio's five default moods. Level 1 is the best. */
     // BEGIN SEED_MOODS
     val SEED_MOODS: List<String> = listOf(
@@ -105,7 +122,7 @@ object Schema {
     // END UPGRADE_1_2
 
     /** Everything a fresh install runs (activities are seeded separately, with colors). */
-    fun create(): List<String> = BASE + NEW_IN_V2 + NEW_IN_V3 + NEW_IN_V4 + SEED_MOODS
+    fun create(): List<String> = BASE + NEW_IN_V2 + NEW_IN_V3 + NEW_IN_V4 + NEW_IN_V5 + SEED_MOODS
 
     /** Version 1 to 2, in order. The helper runs this, then [upgradeFrom2], inside one transaction. */
     fun upgradeFrom1(): List<String> = NEW_IN_V2 + SEED_MOODS + UPGRADE_1_2
@@ -115,4 +132,7 @@ object Schema {
 
     /** Version 3 to 4. */
     fun upgradeFrom3(): List<String> = NEW_IN_V4
+
+    /** Version 4 to 5. */
+    fun upgradeFrom4(): List<String> = NEW_IN_V5
 }

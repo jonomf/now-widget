@@ -130,6 +130,40 @@ def test_titles():
     check(db.execute('SELECT activity_id, title FROM entry WHERE id = 1').fetchone() == (5, 'fixing the bike'), 'other entries untouched')
 
 
+# --- Mention index (schema v5) ---
+
+def test_mentions():
+    db = fresh_v2()
+    db.execute(SQL['DAY_NOTE_UPSERT'], ('n1', '2025-4-9.md', 5, 1000))
+    db.execute(SQL['DAY_NOTE_UPSERT'], ('n2', '2025-4-10.md', 6, 2000))
+    db.execute(SQL['MENTION_ADD'], ('n1', 'the loft', 'The Loft', 1000, 1, 0))
+    db.execute(SQL['MENTION_ADD'], ('n1', 'mom', 'Mom', 1000, 0, 1))
+    db.execute(SQL['MENTION_ADD'], ('n2', 'the loft', 'The loft', 2000, 1, 0))
+    check(one(db, SQL['DAY_NOTE_COUNT']) == 2, 'two daily notes known')
+    check(sorted(db.execute(SQL['DAY_NOTES']).fetchall()) == [('n1', '2025-4-9.md', 5), ('n2', '2025-4-10.md', 6)], 'day note cache')
+    # A changed note: its mentions are replaced, the other note's stay.
+    db.execute(SQL['MENTIONS_OF_NOTE_CLEAR'], ('n1',))
+    db.execute(SQL['MENTION_ADD'], ('n1', 'mom', 'Mom', 1000, 0, 1))
+    db.execute(SQL['DAY_NOTE_UPSERT'], ('n1', '2025-4-9.md', 7, 1000))
+    got = sorted(db.execute(SQL['MENTIONS_ALL']).fetchall())
+    check(got == [('n1', 'mom', 'Mom', 1000, 0, 1), ('n2', 'the loft', 'The loft', 2000, 1, 0)], 'mentions of a re-read note replaced: %r' % got)
+    # A deleted note takes its mentions with it.
+    db.execute(SQL['MENTIONS_OF_NOTE_CLEAR'], ('n2',))
+    db.execute(SQL['DAY_NOTE_DELETE'], ('n2',))
+    check(one(db, 'SELECT COUNT(*) FROM mention WHERE doc_id = ?', ('n2',)) == 0 and one(db, SQL['DAY_NOTE_COUNT']) == 1, 'deleted note gone')
+    # Scores are rewritten as a whole.
+    db.execute(SQL['VAULT_RANK_SET'], (1, 2.5))
+    db.execute(SQL['VAULT_RANK_CLEAR'])
+    db.execute(SQL['VAULT_RANK_SET'], (2, 1.5))
+    check(db.execute(SQL['VAULT_RANKS']).fetchall() == [(2, 1.5)], 'vault ranks replaced')
+    # Sources: a mention-made link, and the once-only kind change of a scan-made one.
+    db.execute(SQL['LINK_SOURCE_MENTIONS'], (5,))
+    db.execute(SQL['LINK_SOURCE_ADD'], (6,))
+    db.execute(SQL['LINK_KIND_FROM_MENTIONS'], (6,))
+    db.execute(SQL['LINK_KIND_FROM_MENTIONS'], (5,))  # not a scan-made one: unchanged
+    check(sorted(db.execute(SQL['LINK_SOURCES']).fetchall()) == [(5, 'mentions'), (6, 'vault-kind')], 'link sources')
+
+
 # --- Daylio import ---
 
 PREDEF = {1: 'rad', 2: 'good', 3: 'meh', 4: 'bad', 5: 'awful'}
@@ -483,6 +517,7 @@ def main():
     test_sticky_context()
     test_flow_defaults_and_uses()
     test_titles()
+    test_mentions()
     test_import()
     test_export_days()
     test_change_reach()
@@ -493,7 +528,7 @@ def main():
     test_alias_and_rename_sql()
     test_v2_links_stay_chips_after_a_scan()
     print(f'{len(failures)} failures' if failures else
-          f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; check-in flow defaults and uses; free-written titles; '
+          f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; check-in flow defaults and uses; free-written titles; mention index; '
           'import dedupe (re-import, same-minute notes, native feelings); rollback on failure; '
           'export dirty days, change counters and hashes; change reach; calendar and Toggl records by day; areas; vault cache; alias binding and rename; v2 links stay chips')
     sys.exit(1 if failures else 0)

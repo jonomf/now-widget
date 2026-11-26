@@ -11,6 +11,7 @@ import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import com.jono.nowwidget.core.LinkKind
 
 /**
  * The "Obsidian" part of the settings screen: choose the vault folder once (the system folder
@@ -29,6 +30,10 @@ class ObsidianSection(private val a: Activity) {
     private lateinit var rescan: Button
     private lateinit var stop: Button
     private lateinit var imported: Switch
+    private val ranking = TextView(a).apply {
+        textSize = 14f
+        setPadding(0, a.dp(4), 0, a.dp(8))
+    }
 
     init {
         view.addView(a.heading("Obsidian"))
@@ -46,12 +51,15 @@ class ObsidianSection(private val a: Activity) {
         view.addView(status)
         today = button("Write today now") { ObsidianExport.writeToday(a) }
         all = button("Write all days") { confirmAll() }
-        rescan = button("Rescan vault notes") { ObsidianExport.rescan(a) }
+        rescan = button("Rescan vault and daily notes") { ObsidianExport.rescan(a) }
         stop = button("Stop exporting") { confirmStop() }
         view.addView(today)
         view.addView(all)
         view.addView(rescan)
         view.addView(stop)
+        view.addView(a.label("People and places ranking"))
+        view.addView(a.note("Who and where come first by how often and how lately your daily notes mention them (\"At [[Place]] w [[Person]]\" counts double), plus what you log in Now. People and places with no note of their own are found too, once three notes mention them."))
+        view.addView(ranking)
         imported = Switch(a).apply {
             text = "Also write days from imported history"
             textSize = 16f
@@ -107,6 +115,7 @@ class ObsidianSection(private val a: Activity) {
         val problem = Prefs.vaultError(a)
         if (problem.isNotBlank()) lines.add("Problem: $problem")
         status.text = lines.joinToString("\n")
+        ranking.text = if (!on) "" else rankingText()
         pick.text = if (on) "Change vault folder" else "Choose vault folder"
         val idle = busy.isBlank()
         today.isEnabled = on && idle
@@ -117,6 +126,19 @@ class ObsidianSection(private val a: Activity) {
     }
 
     private fun stamp(ms: Long): String = Fmt.day(ms) + ", " + Fmt.time(a, ms)
+
+    /** "Ranked from 1807 daily notes · last read …", then the top five people and places, so the ranking can be checked. */
+    private fun rankingText(): String {
+        val n = Store.dayNoteCount(a)
+        val at = Prefs.rankLastRead(a)
+        if (n == 0 && at == 0L) return "Not ranked yet: tap Rescan."
+        val links = Store.allLinks(a)
+        val ranks = Store.linkRanks(a)
+        fun top(kind: String) = Store.rankLinks(a, links.filter { it.kind == kind && !it.archived }, ranks).take(5)
+            .joinToString(", ") { it.title }.ifEmpty { "none yet" }
+        return "Ranked from $n daily notes · last read " + (if (at == 0L) "never" else stamp(at)) +
+            "\nPeople: " + top(LinkKind.PERSON) + "\nPlaces: " + top(LinkKind.PLACE)
+    }
 
     private fun choose() {
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)

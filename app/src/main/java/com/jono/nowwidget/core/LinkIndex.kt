@@ -16,8 +16,12 @@ data class LinkEntry(
 /** [alias] is the alias that matched, when the title itself didn't. Choosing it means [link]. */
 data class Suggestion(val link: LinkEntry, val alias: String?)
 
-/** Type-ahead over links: titles and aliases, most used first. Pure. */
-class LinkIndex(private val entries: List<LinkEntry>) {
+/**
+ * Type-ahead over links: titles and aliases, best ranked first ([rank]: Now use and the vault's
+ * mentions, see [Mentions.combined]; without one, most used first). Pure.
+ */
+class LinkIndex(private val entries: List<LinkEntry>, private val rank: Map<Long, Double> = emptyMap()) {
+    private fun score(e: LinkEntry): Double = rank[e.id] ?: 0.0
     private fun norm(s: String) = s.trim().lowercase(Locale.ROOT)
 
     private fun words(s: String): List<String> = s.split(Regex("[^\\p{L}\\p{N}]+")).filter { it.isNotEmpty() }
@@ -37,8 +41,8 @@ class LinkIndex(private val entries: List<LinkEntry>) {
         val q = norm(query)
         val pool = entries.filter { it.kind in kinds }
         if (q.isEmpty()) {
-            return pool.filter { it.uses > 0 || it.pinned }
-                .sortedWith(compareBy<LinkEntry>({ it.archived }, { -it.uses }, { it.title.lowercase(Locale.ROOT) }))
+            return pool.filter { it.uses > 0 || it.pinned || score(it) > 0.0 }
+                .sortedWith(compareBy<LinkEntry>({ it.archived }, { -score(it) }, { -it.uses }, { it.title.lowercase(Locale.ROOT) }))
                 .take(limit).map { Suggestion(it, null) }
         }
         class Hit(val e: LinkEntry, val tier: Int, val alias: String?)
@@ -69,7 +73,7 @@ class LinkIndex(private val entries: List<LinkEntry>) {
             if (tier < 99) hits.add(Hit(e, tier, alias))
         }
         return hits.sortedWith(
-            compareBy<Hit>({ it.tier }, { it.e.archived }, { -it.e.uses }, { it.e.title.length }, { it.e.title.lowercase(Locale.ROOT) })
+            compareBy<Hit>({ it.tier }, { it.e.archived }, { -score(it.e) }, { -it.e.uses }, { it.e.title.length }, { it.e.title.lowercase(Locale.ROOT) })
         ).take(limit).map { Suggestion(it.e, it.alias) }
     }
 

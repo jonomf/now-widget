@@ -348,21 +348,16 @@ object CheckInFlow {
     fun onLockScreen(state: FlowState?): Boolean = state != null && state.step != FlowStep.FEELING
 
     /**
-     * Every person or place that could be chosen, best first: [first] (the defaults), then the
-     * chips (ones you made, pinned or used) by [scores], then the rest (the vault's notes you
-     * haven't used in Now yet) by score, then by name. Removed ones are left out.
+     * Every person or place that could be chosen, best first: [first] (the defaults), then by
+     * [scores] (the combined ranking: Now use ×3 plus the vault's mentions, [Mentions.combined]),
+     * then by name. Removed ones are left out.
      */
     fun candidates(links: List<Link>, scores: Map<Long, Double>, first: List<Long>): List<Link> {
         val live = links.filter { !it.archived }
         val byId = live.associateBy { it.id }
         val head = first.distinct().mapNotNull { byId[it] }
         val headIds = head.map { it.id }.toSet()
-        val rest = live.filter { it.id !in headIds }
-        val chips = rest.filter { it.chip }
-            .sortedWith(compareByDescending<Link> { scores[it.id] ?: 0.0 }.thenBy { it.pos }.thenBy { it.id })
-        val others = rest.filter { !it.chip }
-            .sortedWith(compareByDescending<Link> { scores[it.id] ?: 0.0 }.thenBy { it.title.lowercase() }.thenBy { it.id })
-        return head + chips + others
+        return head + Mentions.ranked(live.filter { it.id !in headIds }, scores, { it.id }, { it.title })
     }
 
     /** Every chip list ends with this, everywhere. */

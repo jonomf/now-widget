@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Proves the database upgrades (v1, v2 and v3 → v4) off the phone, with python's sqlite3.
+"""Proves the database upgrades (v1, v2, v3 and v4 → v5) off the phone, with python's sqlite3.
 
 - Builds a v1 database from the exact DDL build 6's Store.kt ran (commit 79494ee), a v2
   database from the exact DDL Phase 1 shipped (commit ab008e3), and a v3 database from the DDL
-  builds 7–13 shipped (commit 9f42606), all pasted below.
+  builds 7–13 shipped (commit 9f42606), and a v4 database (v3 plus entry.title, commit 70632ca), all
+  pasted below.
 - Fills them with realistic rows.
 - Applies the upgrade SQL read straight out of core/Schema.kt (not retyped), the way
   SQLiteOpenHelper does: in one transaction that also sets user_version. Which lists run for
@@ -89,6 +90,15 @@ V3_DDL = V2_DDL + [
 ]
 
 
+# Version 4 as commit 70632ca shipped it: v3 plus Schema.kt NEW_IN_V4, verbatim.
+V4_DDL = V3_DDL + ["ALTER TABLE entry ADD COLUMN title TEXT"]
+
+# The tables, indexes and their auto-indexes version 5 adds (none of them touch an existing table).
+NEW_V5 = ['schema:day_note', 'rows:day_note', 'schema:sqlite_autoindex_day_note_1',
+          'schema:mention', 'rows:mention', 'schema:sqlite_autoindex_mention_1', 'schema:mention_target',
+          'schema:vault_rank', 'rows:vault_rank']
+
+
 def v1_ddl():
     return V1_DDL
 
@@ -131,7 +141,7 @@ def upgrade_statements(old_version):
     """What Store.kt's onUpgrade runs for a database at old_version: the same gates, same order."""
     store = open(os.path.join(REPO, 'app/src/main/java/com/jono/nowwidget/Store.kt'), encoding='utf-8').read()
     gates = re.findall(r'if \(oldVersion < (\d+)\) Schema\.(\w+)\(\)\.forEach', store)
-    assert gates == [('2', 'upgradeFrom1'), ('3', 'upgradeFrom2'), ('4', 'upgradeFrom3')], 'onUpgrade in Store.kt changed: ' + str(gates)
+    assert gates == [('2', 'upgradeFrom1'), ('3', 'upgradeFrom2'), ('4', 'upgradeFrom3'), ('5', 'upgradeFrom4')], 'onUpgrade in Store.kt changed: ' + str(gates)
     out = []
     for below, fn in gates:
         if old_version < int(below):
@@ -210,7 +220,7 @@ def open_helper(db, fail_after=None):
     v = db.execute('PRAGMA user_version').fetchone()[0]
     if v == version:
         return 'nothing to do'
-    assert v in (1, 2, 3), v
+    assert v in (1, 2, 3, 4), v
     db.execute('BEGIN')
     try:
         stmts = upgrade_statements(v)
@@ -281,6 +291,37 @@ def make_v3(path):
     db.execute("INSERT INTO export_day (target, day, dirty) VALUES ('calendar', '2025-4-9', 2), ('toggl', '2025-4-9', 0)")
     db.execute('PRAGMA user_version = 3')
     return db
+
+
+def make_v4(path):
+    """A version 4 database: the v3 rows, plus free-written titles on some entries."""
+    if os.path.exists(path):
+        os.remove(path)
+    db = make_v3(path)
+    db.execute('BEGIN')
+    for s in V4_DDL[len(V3_DDL):]:
+        db.execute(s)
+    db.execute('COMMIT')
+    db.execute("UPDATE entry SET title = 'fixing the bike' WHERE id IN (2, 5)")
+    db.execute("INSERT INTO entry (activity_id, start_ms, title) VALUES (4, 1731100000000, 'Tax forms')")
+    db.execute('PRAGMA user_version = 4')
+    return db
+
+
+def check_v5_tables(db, label):
+    """The v5 tables start empty and take the rows the mention scan writes (StoreSql's shapes)."""
+    for t in ('day_note', 'mention', 'vault_rank'):
+        check(rows(db, f'SELECT COUNT(*) FROM {t}') == [(0,)], f'{label}: {t} starts empty')
+    db.execute("INSERT OR REPLACE INTO day_note (doc_id, name, modified, day) VALUES ('n1', '2025-4-9.md', 5, 1744200000000)")
+    db.execute("INSERT OR REPLACE INTO day_note (doc_id, name, modified, day) VALUES ('n1', '2025-4-9.md', 6, 1744200000000)")
+    check(rows(db, 'SELECT COUNT(*), MAX(modified) FROM day_note') == [(1, 6)], f'{label}: day_note upsert replaces by doc_id')
+    db.execute("INSERT OR REPLACE INTO mention (doc_id, target, spelled, day, at_count, w_count) VALUES ('n1', 'the loft', 'The Loft', 1744200000000, 1, 0)")
+    db.execute("INSERT OR REPLACE INTO mention (doc_id, target, spelled, day, at_count, w_count) VALUES ('n1', 'the loft', 'The loft', 1744200000000, 1, 0)")
+    check(rows(db, "SELECT COUNT(*), MAX(spelled) FROM mention") == [(1, 'The loft')], f'{label}: one mention per note and target')
+    db.execute("INSERT OR REPLACE INTO vault_rank (link_id, score) VALUES (1, 2.5)")
+    check(rows(db, 'SELECT score FROM vault_rank') == [(2.5,)], f'{label}: vault_rank takes a score')
+    for t in ('day_note', 'mention', 'vault_rank'):
+        db.execute(f'DELETE FROM {t}')
 
 
 NEW_V3_TABLES = ('vault_note', 'link_source', 'link_note')
@@ -369,16 +410,19 @@ def main():
     tmp = '/tmp/now-migration-test'
     os.makedirs(tmp, exist_ok=True)
     version = schema_version()
-    check(version == 4, f'Schema.VERSION is {version}')
+    check(version == 5, f'Schema.VERSION is {version}')
     up1 = upgrade_statements(1)
     up2 = upgrade_statements(2)
     up3 = upgrade_statements(3)
-    check(up3 == statements('upgradeFrom3') and
-          up2 == statements('upgradeFrom2') + statements('upgradeFrom3') and
-          up1 == statements('upgradeFrom1') + statements('upgradeFrom2') + statements('upgradeFrom3'),
-          'v1 runs all three upgrade lists in order, v2 the last two, v3 only the last')
-    print(f'v1 DDL: {len(v1_ddl())} statements (build 6); v2 DDL: {len(V2_DDL)}; v3 DDL: {len(V3_DDL)}; '
-          f'upgrade from v1: {len(up1)} statements; from v2: {len(up2)}; from v3: {len(up3)}')
+    up4 = upgrade_statements(4)
+    s4 = statements('upgradeFrom4')
+    check(up4 == s4 and
+          up3 == statements('upgradeFrom3') + s4 and
+          up2 == statements('upgradeFrom2') + statements('upgradeFrom3') + s4 and
+          up1 == statements('upgradeFrom1') + statements('upgradeFrom2') + statements('upgradeFrom3') + s4,
+          'v1 runs all four upgrade lists in order, v2 the last three, v3 the last two, v4 only the last')
+    print(f'v1 DDL: {len(v1_ddl())} statements (build 6); v2 DDL: {len(V2_DDL)}; v3 DDL: {len(V3_DDL)}; v4 DDL: {len(V4_DDL)}; '
+          f'upgrade from v1: {len(up1)} statements; from v2: {len(up2)}; from v3: {len(up3)}; from v4: {len(up4)}')
 
     # === From v1 (build 6) ===
 
@@ -439,7 +483,7 @@ def main():
     check(dump(db) == after, 'a forced second upgrade rolled back cleanly (no duplicates)')
 
     # 4. The upgraded schema equals a fresh install.
-    fresh = check_fresh_equals(db, 'v1→v4')
+    fresh = check_fresh_equals(db, 'v1→v5')
     v1 = make_v1(tmp + '/v1-auto.db')
     for t in ('activity', 'person', 'entry'):
         sql = v1.execute("SELECT sql FROM sqlite_master WHERE name=?", (t,)).fetchone()[0]
@@ -476,7 +520,7 @@ def main():
     added = sorted(set(after) - set(before))
     check(added == sorted(['schema:vault_note', 'rows:vault_note', 'schema:vault_note_link', 'schema:sqlite_autoindex_vault_note_1',
                            'schema:link_source', 'rows:link_source', 'schema:link_note', 'rows:link_note',
-                           'schema:link_note_doc']),
+                           'schema:link_note_doc'] + NEW_V5),
           f'v2 upgrade added exactly the new tables and index: {added}')
     check(n_tables_before > 10, 'the v2 fixture filled the tables')
     for t in ('link', 'entry', 'entry_link', 'moment', 'moment_tag', 'moment_ref', 'feeling_tag', 'mood', 'export_state', 'export_day', 'group_calendar'):
@@ -494,7 +538,7 @@ def main():
     except sqlite3.OperationalError:
         db.execute('ROLLBACK')
     check(dump(db) == after2, 'v2: a forced second upgrade rolled back cleanly')
-    fresh2 = check_fresh_equals(db, 'v2→v4')
+    fresh2 = check_fresh_equals(db, 'v2→v5')
     # The dirty flag and hash the export keeps survive, so Phase 2 doesn't rewrite what it already wrote.
     check(rows(db, "SELECT local_key, content_hash FROM export_state") == [('2025-4-9', 'abc')], 'v2: export_state kept')
     check(rows(db, "SELECT day, dirty FROM export_day ORDER BY day") == [('2025-4-8', 0), ('2025-4-9', 1)], 'v2: export_day kept')
@@ -515,7 +559,7 @@ def main():
         if k in ('user_version', 'schema:entry', 'rows:entry'):
             continue
         check(after.get(k) == v, f'v3 upgrade changed {k}')
-    check(sorted(set(after) - set(before)) == [], f'v3 upgrade added no table: {sorted(set(after) - set(before))}')
+    check(sorted(set(after) - set(before)) == sorted(NEW_V5), f'v3 upgrade added only the v5 tables: {sorted(set(after) - set(before))}')
     check(strip_title(after['rows:entry']) == before['rows:entry'], 'v3: entry rows unchanged but for the new column')
     check(all(r[-1] is None for r in after['rows:entry']), 'v3: entry.title starts NULL')
     for t in ('vault_note', 'link_source', 'link_note', 'export_state', 'export_day'):
@@ -532,15 +576,50 @@ def main():
     except sqlite3.OperationalError:
         db.execute('ROLLBACK')
     check(dump(db) == after3, 'v3: a forced second upgrade rolled back cleanly')
-    fresh3 = check_fresh_equals(db, 'v3→v4')
+    fresh3 = check_fresh_equals(db, 'v3→v5')
     check_title_column(db, 'v3→v4')
-    check_title_column(fresh3, 'fresh v4')
+    check_title_column(fresh3, 'fresh v5')
+    check_v5_tables(db, 'v3→v5')
     db.close()
     fresh3.close()
 
+    # === From v4 (free-written titles) ===
+
+    check_crash_safe(make_v4, 'v4', len(up4))
+    db = make_v4(tmp + '/v4.db')
+    check(rows(db, 'PRAGMA user_version') == [(4,)], 'the v4 fixture is version 4')
+    before = dump(db)
+    check(open_helper(db) == 'upgraded', 'v4 upgrade ran')
+    check(db.execute('PRAGMA user_version').fetchone()[0] == version, f'v4: user_version is {version}')
+    after = dump(db)
+    for k, v in before.items():
+        if k == 'user_version':
+            continue
+        check(after.get(k) == v, f'v4 upgrade changed {k}')
+    check(sorted(set(after) - set(before)) == sorted(NEW_V5), f'v4 upgrade added exactly the v5 tables: {sorted(set(after) - set(before))}')
+    check(rows(db, "SELECT COUNT(*) FROM entry WHERE title IS NOT NULL") == [(3,)], 'v4: free-written titles kept')
+    after4 = dump(db)
+    check(open_helper(db) == 'nothing to do', 'v4: second open is a no-op')
+    check(dump(db) == after4, 'v4: second open changed nothing')
+    db.execute('BEGIN')
+    try:
+        for s in up4:
+            db.execute(s)
+        check(False, 'v4: forced second upgrade should fail')
+        db.execute('ROLLBACK')
+    except sqlite3.OperationalError:
+        db.execute('ROLLBACK')
+    check(dump(db) == after4, 'v4: a forced second upgrade rolled back cleanly')
+    fresh4 = check_fresh_equals(db, 'v4→v5')
+    check_v5_tables(db, 'v4→v5')
+    check_v5_tables(fresh4, 'fresh v5')
+    db.close()
+    fresh4.close()
+
     print(f'{len(failures)} failures' if failures else
           f'PASS: v1 → v{version} ({len(old["entry"])} entries, {len(old["person"])} people, {len(entries_with_notes)} notes → moments), '
-          f'v2 → v{version} (every v2 table unchanged) and v3 → v{version} (every v3 row kept, entry.title added NULL); '
+          f'v2 → v{version} (every v2 table unchanged), v3 → v{version} (every v3 row kept, entry.title added NULL) '
+          f'and v4 → v{version} (every v4 table and row unchanged, three new tables); '
           f'all equal a fresh install; crash-safe at every step; second open is a no-op')
     sys.exit(1 if failures else 0)
 

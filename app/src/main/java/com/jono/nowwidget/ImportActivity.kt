@@ -162,7 +162,7 @@ class ImportActivity : Activity() {
         // The choices every tag has. Only links that are chips are listed (the vault's thousands of notes
         // aren't); "Find…" searches all of them, and a link the guess picks is added to its own row.
         val liveActs = acts.filter { !it.archived }
-        val liveLinks = links.filter { !it.archived && (it.kind == LinkKind.PERSON || it.kind == LinkKind.PLACE) }
+        val liveLinks = Store.rankLinks(this, links.filter { !it.archived && (it.kind == LinkKind.PERSON || it.kind == LinkKind.PLACE) })
         val base = ArrayList<Pair<String, (String) -> TagTarget>>()
         fun choice(label: String, f: (String) -> TagTarget) {
             base.add(Pair(label, f))

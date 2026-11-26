@@ -295,7 +295,11 @@ class CheckInFlowTest {
         val st = CheckInFlow.start(entry, FlowSettings(), null, emptyList(), now)!!
         assertEquals(listOf(FlowStep.WHERE, FlowStep.WHO, FlowStep.FEELING), st.steps)
         val who = CheckInFlow.options(st.copy(step = FlowStep.WHO), emptyList(), people + vault, moods, emptyMap()) { it.emoji }
-        assertEquals(listOf(10L, 11L, 12L, 21L, 20L), links(who).map { it.id }) // chips, then vault a–z, removed left out
+        // No scores yet: everyone by name, chips or not (removed ones left out).
+        assertEquals(listOf(21L, 12L, 11L, 10L, 20L), links(who).map { it.id })
+        // With scores, the ranking decides: a vault person his notes mention beats an unused chip.
+        val ranked = CheckInFlow.options(st.copy(step = FlowStep.WHO), emptyList(), people + vault, moods, mapOf(20L to 2.0, 10L to 1.0)) { it.emoji }
+        assertEquals(listOf(20L, 10L, 21L), links(ranked).map { it.id }.take(3))
         // None at all: the hint, then Find.
         val none = CheckInFlow.options(st, emptyList(), emptyList(), moods, emptyMap()) { it.emoji }
         assertEquals(listOf(OptionType.HINT, OptionType.PLUS), none.map { it.type })

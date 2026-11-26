@@ -33,6 +33,7 @@ import com.jono.nowwidget.core.LinkKind
 import com.jono.nowwidget.core.LogRules
 import com.jono.nowwidget.core.Moment
 import com.jono.nowwidget.core.MomentKind
+import com.jono.nowwidget.core.Mentions
 import com.jono.nowwidget.core.Mood
 import com.jono.nowwidget.core.ObsidianDay
 import com.jono.nowwidget.core.PALETTE
@@ -98,6 +99,7 @@ private class Helper(ctx: Context) : SQLiteOpenHelper(ctx, "now.db", null, Schem
         if (oldVersion < 2) Schema.upgradeFrom1().forEach { db.execSQL(it) }
         if (oldVersion < 3) Schema.upgradeFrom2().forEach { db.execSQL(it) }
         if (oldVersion < 4) Schema.upgradeFrom3().forEach { db.execSQL(it) }
+        if (oldVersion < 5) Schema.upgradeFrom4().forEach { db.execSQL(it) }
     }
 }
 
@@ -318,7 +320,7 @@ object Store {
         val aliases = vaultAliases(ctx)
         return LinkIndex(allLinks(ctx).map {
             LinkEntry(it.id, it.title, it.kind, aliases[it.id].orEmpty(), it.uses, it.archived, it.pinned)
-        })
+        }, linkRanks(ctx))
     }
 
     /** The link of that kind and name (any case), brought back if it was removed, or a new one. */
@@ -581,6 +583,141 @@ object Store {
         starts.distinctBy { DiaryDay.start(it) }.forEach { dirtyAround(ctx, it) }
         return id
     }
+
+    // --- Ranking people and places by his daily notes (the rules are in core/Mentions.kt) ---
+
+    /** The dated notes read so far: doc id to (name, modified). */
+    fun dayNoteCache(ctx: Context): Map<String, Pair<String, Long>> {
+        val out = HashMap<String, Pair<String, Long>>()
+        db(ctx).rawQuery(StoreSql.DAY_NOTES, null).use { c ->
+            while (c.moveToNext()) out[c.getString(0)] = c.getString(1) to c.getLong(2)
+        }
+        return out
+    }
+
+    fun dayNoteCount(ctx: Context): Int =
+        db(ctx).rawQuery(StoreSql.DAY_NOTE_COUNT, null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+
+    /** One dated note as read: its file, its diary day and what it mentions. */
+    class DayNoteRead(val docId: String, val name: String, val modified: Long, val day: Long, val mentions: Map<String, Mentions.NoteMention>)
+
+    /** Replaces the mentions of the notes [read] and drops those of the notes [gone], in chunks. */
+    fun applyDayNotes(ctx: Context, read: List<DayNoteRead>, gone: Collection<String>) {
+        read.chunked(VAULT_CHUNK).forEach { chunk ->
+            tx(ctx) { d ->
+                chunk.forEach { n ->
+                    d.execSQL(StoreSql.MENTIONS_OF_NOTE_CLEAR, arrayOf<Any>(n.docId))
+                    n.mentions.forEach { (key, m) ->
+                        d.execSQL(StoreSql.MENTION_ADD, arrayOf<Any>(n.docId, key, m.spelled, n.day, if (m.at) 1 else 0, if (m.with) 1 else 0))
+                    }
+                    d.execSQL(StoreSql.DAY_NOTE_UPSERT, arrayOf<Any>(n.docId, n.name, n.modified, n.day))
+                }
+            }
+        }
+        gone.chunked(VAULT_CHUNK).forEach { chunk ->
+            tx(ctx) { d ->
+                chunk.forEach {
+                    d.execSQL(StoreSql.MENTIONS_OF_NOTE_CLEAR, arrayOf<Any>(it))
+                    d.execSQL(StoreSql.DAY_NOTE_DELETE, arrayOf<Any>(it))
+                }
+            }
+        }
+    }
+
+    /** What re-ranking did. */
+    class RankResult(val ranked: Int, val created: Int, val kinded: Int)
+
+    /**
+     * Works the mention score of every link out again (it decays with time, so at each scan):
+     * targets that are links (by title or alias, any case) get theirs, plus [Mentions.OPEN_BONUS]
+     * when the note was opened lately ([lastOpen]); unresolved ones that clearly are people or
+     * places become links marked as made by the mentions (no note: they stay plain `[[Name]]`); a
+     * scan-made link of an untagged note gets its kind from the mentions, once.
+     */
+    fun applyRanking(ctx: Context, now: Long, lastOpen: Set<String>): RankResult {
+        val d = db(ctx)
+        val rows = ArrayList<Mentions.Row>()
+        d.rawQuery(StoreSql.MENTIONS_ALL, null).use { c ->
+            while (c.moveToNext()) rows.add(Mentions.Row(c.getString(0), c.getString(1), c.getString(2), c.getLong(3), c.getInt(4) != 0, c.getInt(5) != 0))
+        }
+        val targets = Mentions.targets(rows, now)
+        val links = allLinks(ctx)
+        val sources = HashMap<Long, String>()
+        d.rawQuery(StoreSql.LINK_SOURCES, null).use { c -> while (c.moveToNext()) sources[c.getLong(0)] = c.getString(1) }
+        val noteKind = HashMap<Long, String>()
+        vaultCache(ctx).values.forEach { r -> r.linkId?.let { noteKind[it] = r.kind } }
+        val aliases = vaultAliases(ctx)
+        val index = LinkIndex(links.map { LinkEntry(it.id, it.title, it.kind, aliases[it.id].orEmpty(), it.uses, it.archived, it.pinned) })
+        val allKinds = setOf(LinkKind.PERSON, LinkKind.PLACE, LinkKind.CONTEXT, LinkKind.OTHER)
+        val score = HashMap<Long, Double>()
+        var created = 0
+        var kinded = 0
+        var pos = nextPos(ctx, "link")
+        tx(ctx) { tdb ->
+            targets.values.forEach { t ->
+                val bonus = if (t.key in lastOpen) Mentions.OPEN_BONUS else 0.0
+                val link = index.resolve(t.title, allKinds)
+                if (link != null) {
+                    score[link.id] = (score[link.id] ?: 0.0) + t.score + bonus
+                    // 21H: a note, but untagged. Its mentions say place.
+                    if (link.kind == LinkKind.OTHER && sources[link.id] == "vault" && noteKind[link.id] != LinkKind.PERSON &&
+                        noteKind[link.id] != LinkKind.PLACE) {
+                        Mentions.promote(t)?.let { k ->
+                            tdb.update("link", ContentValues().apply { put("kind", k) }, "id=?", args(link.id))
+                            tdb.execSQL(StoreSql.LINK_KIND_FROM_MENTIONS, arrayOf<Any>(link.id))
+                            kinded++
+                        }
+                    }
+                    return@forEach
+                }
+                val kind = Mentions.promote(t) ?: return@forEach
+                val id = tdb.insertOrThrow("link", null, ContentValues().apply {
+                    put("title", t.title)
+                    put("kind", kind)
+                    put("emoji", "")
+                    put("pos", pos++)
+                    put("pinned", 0)
+                    put("archived", 0)
+                })
+                tdb.execSQL(StoreSql.LINK_SOURCE_MENTIONS, arrayOf<Any>(id))
+                score[id] = t.score + bonus
+                created++
+            }
+            // A recently opened note that no daily note mentions still gets its bonus.
+            lastOpen.filter { it !in targets }.forEach { k ->
+                index.resolve(k, allKinds)?.let { score[it.id] = (score[it.id] ?: 0.0) + Mentions.OPEN_BONUS }
+            }
+            tdb.execSQL(StoreSql.VAULT_RANK_CLEAR)
+            score.forEach { (id, v) -> tdb.execSQL(StoreSql.VAULT_RANK_SET, arrayOf<Any>(id, v)) }
+        }
+        if (kinded > 0) markWrittenDirty(ctx)
+        return RankResult(score.size, created, kinded)
+    }
+
+    /** Where each link came from: "vault", "vault-kind", "mentions"; links you made aren't in it. */
+    fun linkSources(ctx: Context): Map<Long, String> {
+        val out = HashMap<Long, String>()
+        db(ctx).rawQuery(StoreSql.LINK_SOURCES, null).use { c -> while (c.moveToNext()) out[c.getLong(0)] = c.getString(1) }
+        return out
+    }
+
+    /** The vault's mention score per link (empty until the first scan with mentions). */
+    fun vaultRanks(ctx: Context): Map<Long, Double> {
+        val out = HashMap<Long, Double>()
+        db(ctx).rawQuery(StoreSql.VAULT_RANKS, null).use { c -> while (c.moveToNext()) out[c.getLong(0)] = c.getDouble(1) }
+        return out
+    }
+
+    /**
+     * The one ranking for every people and places list: Now use (recency-weighted, ×3) plus the
+     * vault's mentions. [except]: an entry whose links don't count (the check-in flow's own).
+     */
+    fun linkRanks(ctx: Context, now: Long = System.currentTimeMillis(), except: Long = -1L): Map<Long, Double> =
+        Mentions.combined(CheckInFlow.scores(linkUses(ctx, now - CheckInFlow.HISTORY_MS, except), now), vaultRanks(ctx))
+
+    /** [items] best first by [linkRanks], then by name. */
+    fun rankLinks(ctx: Context, items: List<Link>, ranks: Map<Long, Double> = linkRanks(ctx)): List<Link> =
+        Mentions.ranked(items, ranks, { it.id }, { it.title })
 
     // --- The check-in flow's reads (the rules are in core/CheckInFlow.kt) ---
 
@@ -1653,6 +1790,10 @@ object Prefs {
     fun setVaultScanError(ctx: Context, v: String) = p(ctx).edit().putString("vault_scan_error", v).apply()
 
     fun vaultLastScan(ctx: Context): Long = p(ctx).getLong("vault_last_scan", 0L)
+
+    /** When the daily notes were last read for the people and places ranking. */
+    fun rankLastRead(ctx: Context): Long = p(ctx).getLong("rank_last_read", 0L)
+    fun setRankLastRead(ctx: Context, v: Long) = p(ctx).edit().putLong("rank_last_read", v).apply()
     fun vaultScanText(ctx: Context): String = p(ctx).getString("vault_scan_text", "") ?: ""
     fun setVaultScan(ctx: Context, at: Long, text: String) = p(ctx).edit()
         .putLong("vault_last_scan", at).putString("vault_scan_text", text).apply()

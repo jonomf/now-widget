@@ -35,6 +35,24 @@ object StoreSql {
     /** "Make this an activity": the entries of one title go to the new activity, as plain entries (activity, id). */
     const val ENTRY_TO_ACTIVITY = "UPDATE entry SET activity_id = ?, title = NULL WHERE id = ?"
 
+    /** Mention index (schema v5): the dated notes read, what each mentions, and the score per link. */
+    const val DAY_NOTES = "SELECT doc_id, name, modified FROM day_note"
+    const val DAY_NOTE_UPSERT = "INSERT OR REPLACE INTO day_note (doc_id, name, modified, day) VALUES (?, ?, ?, ?)"
+    const val DAY_NOTE_DELETE = "DELETE FROM day_note WHERE doc_id = ?"
+    const val DAY_NOTE_COUNT = "SELECT COUNT(*) FROM day_note"
+    const val MENTIONS_OF_NOTE_CLEAR = "DELETE FROM mention WHERE doc_id = ?"
+    const val MENTION_ADD = "INSERT OR REPLACE INTO mention (doc_id, target, spelled, day, at_count, w_count) VALUES (?, ?, ?, ?, ?, ?)"
+    const val MENTIONS_ALL = "SELECT doc_id, target, spelled, day, at_count, w_count FROM mention"
+    const val VAULT_RANK_CLEAR = "DELETE FROM vault_rank"
+    const val VAULT_RANK_SET = "INSERT OR REPLACE INTO vault_rank (link_id, score) VALUES (?, ?)"
+    const val VAULT_RANKS = "SELECT link_id, score FROM vault_rank"
+
+    /** A person or place the mentions made (it has no note of its own): marked so, like scan-made links. */
+    const val LINK_SOURCE_MENTIONS = "INSERT OR IGNORE INTO link_source (link_id, source) VALUES (?, 'mentions')"
+    const val LINK_SOURCES = "SELECT link_id, source FROM link_source"
+    /** A scan-made link of an untagged note given its kind by the mentions, once (never again, so a change of yours stays). */
+    const val LINK_KIND_FROM_MENTIONS = "UPDATE link_source SET source = 'vault-kind' WHERE link_id = ? AND source = 'vault'"
+
     /** Import dedupe: the note of the moment with this key, if any. */
     const val NOTE_AT_KEY = "SELECT text FROM moment WHERE source_key = ? LIMIT 1"
     const val KEY_TAKEN = "SELECT 1 FROM moment WHERE source_key = ? LIMIT 1"

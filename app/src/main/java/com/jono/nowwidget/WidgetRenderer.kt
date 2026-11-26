@@ -32,6 +32,7 @@ import com.jono.nowwidget.core.OptionType
 import com.jono.nowwidget.core.Link
 import com.jono.nowwidget.core.LinkKind
 import com.jono.nowwidget.core.LogRules
+import com.jono.nowwidget.core.Mentions
 import com.jono.nowwidget.core.PlannedNudge
 import com.jono.nowwidget.core.StartShift
 import java.util.concurrent.CopyOnWriteArraySet
@@ -183,6 +184,10 @@ object WidgetRenderer {
             .sortedByDescending { it.second }
         val buttons = acts.filter { it.show && !it.archived }
         val flow = CheckIn.current(ctx, cur, links, now)
+        // People and places everywhere: Now use ×3 plus the vault's mentions, then name (the flow's
+        // own entry doesn't count, so chips keep their order while it runs).
+        val ranks = Store.linkRanks(ctx, now, except = flow?.entryId ?: -1L)
+        fun ranked(kind: String) = Mentions.ranked(links.filter { it.kind == kind && !it.archived && it.chip }, ranks, { it.id }, { it.title })
         val prev = cur?.let { Store.currentAndBefore(ctx)?.second }
         val prevAct = prev?.let { p -> byId[p.activityId] }
         val offsets = Prefs.startOffsets(ctx)
@@ -196,10 +201,10 @@ object WidgetRenderer {
             act = cur?.let { byId[it.activityId] },
             buttons = buttons,
             // Links the vault scan made are chips only once pinned or used; yours always are.
-            people = links.filter { it.kind == LinkKind.PERSON && !it.archived && it.chip },
-            places = links.filter { it.kind == LinkKind.PLACE && !it.archived && it.chip },
+            people = ranked(LinkKind.PERSON),
+            places = ranked(LinkKind.PLACE),
             place = cur?.let { c -> links.firstOrNull { it.kind == LinkKind.PLACE && it.id in c.links } },
-            contexts = links.filter { it.kind == LinkKind.CONTEXT && !it.archived && it.chip },
+            contexts = ranked(LinkKind.CONTEXT),
             context = cur?.contextId?.let { id -> links.firstOrNull { it.id == id } },
             curHasMoments = cur != null && Store.hasMoments(ctx, cur.id),
             scores = Store.scores(ctx, now),
@@ -210,7 +215,7 @@ object WidgetRenderer {
             idleSince = idle,
             nudge = nudge(ctx, now, buttons, byId),
             flow = flow,
-            flowOptions = if (flow == null) emptyList() else flowOptions(ctx, flow, links, now),
+            flowOptions = if (flow == null) emptyList() else flowOptions(ctx, flow, links, ranks),
             prev = prev,
             prevAct = prevAct,
             offsets = offsets,
@@ -224,9 +229,7 @@ object WidgetRenderer {
         )
     }
 
-    private fun flowOptions(ctx: Context, flow: FlowState, links: List<Link>, now: Long): List<FlowOption> {
-        val scores = if (flow.step == FlowStep.FEELING) emptyMap()
-        else CheckInFlow.scores(Store.linkUses(ctx, now - CheckInFlow.HISTORY_MS, flow.entryId), now)
+    private fun flowOptions(ctx: Context, flow: FlowState, links: List<Link>, scores: Map<Long, Double>): List<FlowOption> {
         return CheckInFlow.options(
             flow,
             CheckIn.flowLinks(links, LinkKind.PLACE),

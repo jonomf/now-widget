@@ -91,8 +91,12 @@ class ManageActivity : Activity() {
                     else -> "On larger widgets and the expanded notification, tap someone to mark that you're with them."
                 }
                 addButton.text = "Add " + kindName(kind)
-                val items = Store.allLinks(this).filter { it.kind == kind && !it.archived }
+                // People and places in their ranking (Now use and the vault's mentions); contexts in your order.
+                val all = Store.allLinks(this).filter { it.kind == kind && !it.archived }
+                val ranked = kind != LinkKind.CONTEXT
+                val items = if (ranked) Store.rankLinks(this, all) else all
                 val ids = items.map { it.id }
+                val sources = Store.linkSources(this)
                 val vault = ObsidianExport.configured(this)
                 val bound = if (vault) Store.boundNotes(this) else emptyMap()
                 items.forEachIndexed { i, l ->
@@ -102,8 +106,10 @@ class ManageActivity : Activity() {
                         else if (l.inVault) "note in your vault"
                         else "no note yet",
                         if (l.fromVault && !l.chip) "not on the widget" else null,
+                        if (sources[l.id] == "mentions") "from your daily notes (no note)" else null,
                     ).joinToString(" · ")
-                    list.addView(row(l.badge + " " + l.title, sub, null, i, ids, "link") { editLink(l) })
+                    // Ranked lists have no ▲▼: the order comes from use.
+                    list.addView(row(l.badge + " " + l.title, sub, null, if (ranked) 0 else i, if (ranked) listOf(l.id) else ids, "link") { editLink(l) })
                 }
             }
             MODE_MOODS -> {
