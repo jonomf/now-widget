@@ -30,6 +30,7 @@ import com.jono.nowwidget.core.LinkBinding
 import com.jono.nowwidget.core.LinkEntry
 import com.jono.nowwidget.core.LinkIndex
 import com.jono.nowwidget.core.LinkKind
+import com.jono.nowwidget.core.LinkMerge
 import com.jono.nowwidget.core.LogRules
 import com.jono.nowwidget.core.Moment
 import com.jono.nowwidget.core.MomentKind
@@ -113,7 +114,8 @@ data class ImportResult(
 )
 
 /** A vault note as the scan read it, ready to merge into the link table. */
-class VaultUpsert(val docId: String, val name: String, val modified: Long, val note: VaultNote)
+/** [movedFrom]: the document id the same note had before it moved to another folder. */
+class VaultUpsert(val docId: String, val name: String, val modified: Long, val note: VaultNote, val movedFrom: String? = null)
 
 /** What the scan already knows about a vault file. */
 class VaultCacheRow(val docId: String, val name: String, val modified: Long, val kind: String, val linkId: Long?, val title: String)
@@ -692,6 +694,85 @@ object Store {
         }
         if (kinded > 0) markWrittenDirty(ctx)
         return RankResult(score.size, created, kinded)
+    }
+
+    /** How many vault notes each link follows; above 1 is "2 notes named 21H". */
+    fun notesPerLink(ctx: Context): Map<Long, Int> {
+        val out = HashMap<Long, Int>()
+        db(ctx).rawQuery(StoreSql.NOTES_PER_LINK, null).use { c -> while (c.moveToNext()) out[c.getLong(0)] = c.getInt(1) }
+        return out
+    }
+
+    /**
+     * People and places the mentions pass made with no note, that now have one (the vault is read
+     * in all its folders): relabelled, or merged into the note's link ([LinkMerge.plan]). Every
+     * entry keeps its people, places and context. Returns how many were merged.
+     */
+    fun mergeMentionLinks(ctx: Context): Int {
+        val links = allLinks(ctx)
+        val sources = linkSources(ctx)
+        if (sources.values.none { it == "mentions" }) return 0
+        val noted = HashSet<Long>()
+        vaultCache(ctx).values.forEach { r -> r.linkId?.let { noted.add(it) } }
+        noted.addAll(boundNotes(ctx).keys)
+        val aliases = vaultAliases(ctx)
+        val steps = LinkMerge.plan(links.map {
+            LinkMerge.Cand(it.id, it.title, it.kind, it.uses, sources[it.id] == "mentions", it.id in noted, aliases[it.id].orEmpty(), it.archived)
+        })
+        var merged = 0
+        tx(ctx) { d ->
+            steps.forEach { st ->
+                when (st) {
+                    is LinkMerge.Step.Relabel -> d.execSQL(StoreSql.LINK_SOURCE_TO_VAULT, arrayOf<Any>(st.id))
+                    is LinkMerge.Step.Merge -> {
+                        mergeLinkRows(d, st.keep, st.drop)
+                        // The kept one is a note's link now, whichever it was.
+                        d.execSQL(StoreSql.LINK_SOURCE_TO_VAULT, arrayOf<Any>(st.keep))
+                        merged++
+                    }
+                }
+            }
+        }
+        if (merged > 0) markWrittenDirty(ctx)
+        return merged
+    }
+
+    /**
+     * A scan-made link of an untagged note (21H at the root) that also has a tagged note of the same
+     * name (`_jonoco/Fam/21H.md`) takes the tagged one's kind: the typed note is the one it follows.
+     */
+    fun adoptNoteKinds(ctx: Context): Int {
+        val sources = linkSources(ctx)
+        val byLink = HashMap<Long, MutableSet<String>>()
+        vaultCache(ctx).values.forEach { r -> r.linkId?.let { byLink.getOrPut(it) { HashSet() }.add(r.kind) } }
+        var n = 0
+        tx(ctx) { d ->
+            allLinks(ctx).filter { it.kind == LinkKind.OTHER && sources[it.id] == "vault" }.forEach { l ->
+                val kinds = byLink[l.id].orEmpty() - LinkKind.OTHER
+                val k = listOf(LinkKind.PERSON, LinkKind.PLACE, LinkKind.CONTEXT).firstOrNull { it in kinds } ?: return@forEach
+                d.update("link", ContentValues().apply { put("kind", k) }, "id=?", args(l.id))
+                n++
+            }
+        }
+        if (n > 0) markWrittenDirty(ctx)
+        return n
+    }
+
+    /** Moves every use of [drop] to [keep] and removes [drop]. */
+    private fun mergeLinkRows(d: SQLiteDatabase, keep: Long, drop: Long) {
+        val kd = arrayOf<Any>(keep, drop)
+        val dd = arrayOf<Any>(drop)
+        d.execSQL(StoreSql.MERGE_ENTRY_LINKS, kd)
+        d.execSQL(StoreSql.MERGE_ENTRY_LINKS_LEFT, dd)
+        d.execSQL(StoreSql.MERGE_CONTEXTS, kd)
+        d.execSQL(StoreSql.MERGE_MOMENT_REFS, kd)
+        d.execSQL(StoreSql.MERGE_MOMENT_REFS_LEFT, dd)
+        d.execSQL(StoreSql.MERGE_VAULT_NOTES, kd)
+        d.execSQL(StoreSql.MERGE_LINK_NOTE, kd)
+        d.execSQL(StoreSql.MERGE_LINK_NOTE_LEFT, dd)
+        d.execSQL(StoreSql.MERGE_SOURCE_LEFT, dd)
+        d.execSQL(StoreSql.MERGE_RANK_LEFT, dd)
+        d.execSQL(StoreSql.MERGE_LINK_DELETE, dd)
     }
 
     /** Where each link came from: "vault", "vault-kind", "mentions"; links you made aren't in it. */
@@ -1597,7 +1678,8 @@ object Store {
             tx(ctx) { d ->
                 chunk.forEach { u ->
                     val n = u.note
-                    val old = cache[u.docId]
+                    // A note moved between folders has a new id: it's still the same note.
+                    val old = cache[u.docId] ?: u.movedFrom?.let { cache[it] }
                     val plan = LinkBinding.plan(BindNote(u.docId, n.title, n.aliases), n.kind, old?.title, old?.linkId, entries)
                     val linkId: Long
                     when (plan) {
@@ -1790,6 +1872,10 @@ object Prefs {
     fun setVaultScanError(ctx: Context, v: String) = p(ctx).edit().putString("vault_scan_error", v).apply()
 
     fun vaultLastScan(ctx: Context): Long = p(ctx).getLong("vault_last_scan", 0L)
+
+    /** The last scan's whole-vault counts: notes indexed and folders walked. */
+    fun indexCounts(ctx: Context): Pair<Int, Int> = p(ctx).getInt("index_notes", 0) to p(ctx).getInt("index_folders", 0)
+    fun setIndexCounts(ctx: Context, notes: Int, folders: Int) = p(ctx).edit().putInt("index_notes", notes).putInt("index_folders", folders).apply()
 
     /** When the daily notes were last read for the people and places ranking. */
     fun rankLastRead(ctx: Context): Long = p(ctx).getLong("rank_last_read", 0L)

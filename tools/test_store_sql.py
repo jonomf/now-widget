@@ -164,6 +164,38 @@ def test_mentions():
     check(sorted(db.execute(SQL['LINK_SOURCES']).fetchall()) == [(5, 'mentions'), (6, 'vault-kind')], 'link sources')
 
 
+# --- Merging a no-note link into its note's link ---
+
+def test_link_merge():
+    db = fresh_v2()
+    db.execute("INSERT INTO link (id, title, kind) VALUES (1, 'Mom', 'person'), (2, 'Mom', 'person'), (3, 'The Loft', 'place')")
+    # Entry 10 had only the no-note Mom; entry 11 had both (a duplicate after the merge); entry 12 only the note's.
+    db.execute("INSERT INTO entry (id, activity_id, start_ms, context_id) VALUES (10, 1, 100, 1), (11, 1, 200, NULL), (12, 1, 300, NULL)")
+    db.execute("INSERT INTO entry_link (entry_id, link_id) VALUES (10, 1), (10, 3), (11, 1), (11, 2), (12, 2)")
+    db.execute("INSERT INTO moment (id, ts, kind) VALUES (50, 1, 'feeling')")
+    db.execute("INSERT INTO moment_ref (moment_id, kind, ref_id) VALUES (50, 'link', 1), (50, 'link', 2), (50, 'activity', 1)")
+    db.execute("INSERT INTO vault_note (doc_id, name, modified, title, kind, aliases, link_id) VALUES ('j/Mom.md', 'Mom.md', 1, 'Mom', 'person', '', 2)")
+    db.execute("INSERT INTO link_source (link_id, source) VALUES (1, 'mentions'), (2, 'vault')")
+    db.execute("INSERT INTO vault_rank (link_id, score) VALUES (1, 3.0), (2, 1.0)")
+    keep, drop = 1, 2  # the mention-made one has more entries, so it keeps its id
+    db.execute('BEGIN')
+    for name, a in (('MERGE_ENTRY_LINKS', (keep, drop)), ('MERGE_ENTRY_LINKS_LEFT', (drop,)), ('MERGE_CONTEXTS', (keep, drop)),
+                    ('MERGE_MOMENT_REFS', (keep, drop)), ('MERGE_MOMENT_REFS_LEFT', (drop,)), ('MERGE_VAULT_NOTES', (keep, drop)),
+                    ('MERGE_LINK_NOTE', (keep, drop)), ('MERGE_LINK_NOTE_LEFT', (drop,)), ('MERGE_SOURCE_LEFT', (drop,)),
+                    ('MERGE_RANK_LEFT', (drop,)), ('MERGE_LINK_DELETE', (drop,)), ('LINK_SOURCE_TO_VAULT', (keep,))):
+        db.execute(SQL[name], a)
+    db.execute('COMMIT')
+    got = sorted(db.execute('SELECT entry_id, link_id FROM entry_link').fetchall())
+    check(got == [(10, 1), (10, 3), (11, 1), (12, 1)], 'every entry keeps its person and place, once: %r' % got)
+    check(one(db, 'SELECT context_id FROM entry WHERE id = 10') == 1, 'context kept')
+    check(sorted(db.execute('SELECT kind, ref_id FROM moment_ref').fetchall()) == [('activity', 1), ('link', 1)], 'moment refs merged')
+    check(one(db, "SELECT link_id FROM vault_note WHERE doc_id = 'j/Mom.md'") == 1, 'the note follows the kept link')
+    check(db.execute('SELECT link_id, source FROM link_source').fetchall() == [(1, 'vault')], 'kept link is a vault link now')
+    check(db.execute('SELECT link_id FROM vault_rank').fetchall() == [(1,)], 'dropped rank gone')
+    check(one(db, 'SELECT COUNT(*) FROM link WHERE id = 2') == 0, 'dropped link gone')
+    check(db.execute(SQL['NOTES_PER_LINK']).fetchall() == [(1, 1)], 'notes per link')
+
+
 # --- Daylio import ---
 
 PREDEF = {1: 'rad', 2: 'good', 3: 'meh', 4: 'bad', 5: 'awful'}
@@ -518,6 +550,7 @@ def main():
     test_flow_defaults_and_uses()
     test_titles()
     test_mentions()
+    test_link_merge()
     test_import()
     test_export_days()
     test_change_reach()
@@ -528,7 +561,7 @@ def main():
     test_alias_and_rename_sql()
     test_v2_links_stay_chips_after_a_scan()
     print(f'{len(failures)} failures' if failures else
-          f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; check-in flow defaults and uses; free-written titles; mention index; '
+          f'PASS: {len(SQL)} statements from StoreSql.kt; delete detaches moments; sticky context; check-in flow defaults and uses; free-written titles; mention index; link merge; '
           'import dedupe (re-import, same-minute notes, native feelings); rollback on failure; '
           'export dirty days, change counters and hashes; change reach; calendar and Toggl records by day; areas; vault cache; alias binding and rename; v2 links stay chips')
     sys.exit(1 if failures else 0)

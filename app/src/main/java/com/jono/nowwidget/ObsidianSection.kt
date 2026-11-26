@@ -131,12 +131,13 @@ class ObsidianSection(private val a: Activity) {
     private fun rankingText(): String {
         val n = Store.dayNoteCount(a)
         val at = Prefs.rankLastRead(a)
+        val (notes, folders) = Prefs.indexCounts(a)
         if (n == 0 && at == 0L) return "Not ranked yet: tap Rescan."
         val links = Store.allLinks(a)
         val ranks = Store.linkRanks(a)
         fun top(kind: String) = Store.rankLinks(a, links.filter { it.kind == kind && !it.archived }, ranks).take(5)
             .joinToString(", ") { it.title }.ifEmpty { "none yet" }
-        return "Ranked from $n daily notes · last read " + (if (at == 0L) "never" else stamp(at)) +
+        return "Indexed $notes notes in $folders folders · ranked from $n daily notes · last read " + (if (at == 0L) "never" else stamp(at)) +
             "\nPeople: " + top(LinkKind.PERSON) + "\nPlaces: " + top(LinkKind.PLACE)
     }
 

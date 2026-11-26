@@ -97,6 +97,7 @@ class ManageActivity : Activity() {
                 val items = if (ranked) Store.rankLinks(this, all) else all
                 val ids = items.map { it.id }
                 val sources = Store.linkSources(this)
+                val noteCounts = if (ObsidianExport.configured(this)) Store.notesPerLink(this) else emptyMap()
                 val vault = ObsidianExport.configured(this)
                 val bound = if (vault) Store.boundNotes(this) else emptyMap()
                 items.forEachIndexed { i, l ->
@@ -107,6 +108,7 @@ class ManageActivity : Activity() {
                         else "no note yet",
                         if (l.fromVault && !l.chip) "not on the widget" else null,
                         if (sources[l.id] == "mentions") "from your daily notes (no note)" else null,
+                        noteCounts[l.id]?.takeIf { it > 1 }?.let { "$it notes named " + l.title },
                     ).joinToString(" · ")
                     // Ranked lists have no ▲▼: the order comes from use.
                     list.addView(row(l.badge + " " + l.title, sub, null, if (ranked) 0 else i, if (ranked) listOf(l.id) else ids, "link") { editLink(l) })

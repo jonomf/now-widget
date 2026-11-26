@@ -53,6 +53,26 @@ object StoreSql {
     /** A scan-made link of an untagged note given its kind by the mentions, once (never again, so a change of yours stays). */
     const val LINK_KIND_FROM_MENTIONS = "UPDATE link_source SET source = 'vault-kind' WHERE link_id = ? AND source = 'vault'"
 
+    /**
+     * Merging two links for one person or place (keep, drop): every use moves to the kept one; where
+     * an entry or moment already has both, the duplicate row goes, so nothing is ever lost.
+     */
+    const val MERGE_ENTRY_LINKS = "UPDATE OR IGNORE entry_link SET link_id = ? WHERE link_id = ?"
+    const val MERGE_ENTRY_LINKS_LEFT = "DELETE FROM entry_link WHERE link_id = ?"
+    const val MERGE_CONTEXTS = "UPDATE entry SET context_id = ? WHERE context_id = ?"
+    const val MERGE_MOMENT_REFS = "UPDATE OR IGNORE moment_ref SET ref_id = ? WHERE kind = 'link' AND ref_id = ?"
+    const val MERGE_MOMENT_REFS_LEFT = "DELETE FROM moment_ref WHERE kind = 'link' AND ref_id = ?"
+    const val MERGE_VAULT_NOTES = "UPDATE vault_note SET link_id = ? WHERE link_id = ?"
+    const val MERGE_LINK_NOTE = "UPDATE OR IGNORE link_note SET link_id = ? WHERE link_id = ?"
+    const val MERGE_LINK_NOTE_LEFT = "DELETE FROM link_note WHERE link_id = ?"
+    const val MERGE_SOURCE_LEFT = "DELETE FROM link_source WHERE link_id = ?"
+    const val MERGE_RANK_LEFT = "DELETE FROM vault_rank WHERE link_id = ?"
+    const val MERGE_LINK_DELETE = "DELETE FROM link WHERE id = ?"
+    /** A mention-made link that has a note now is an ordinary vault link. */
+    const val LINK_SOURCE_TO_VAULT = "UPDATE link_source SET source = 'vault' WHERE link_id = ? AND source = 'mentions'"
+    /** How many notes are bound to each link: more than one is "2 notes named 21H". */
+    const val NOTES_PER_LINK = "SELECT link_id, COUNT(*) FROM vault_note WHERE link_id IS NOT NULL GROUP BY link_id"
+
     /** Import dedupe: the note of the moment with this key, if any. */
     const val NOTE_AT_KEY = "SELECT text FROM moment WHERE source_key = ? LIMIT 1"
     const val KEY_TAKEN = "SELECT 1 FROM moment WHERE source_key = ? LIMIT 1"
