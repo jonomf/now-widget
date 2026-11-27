@@ -13,6 +13,9 @@
          it to Toggl Track (api.track.toggl.com), each only when you turn it on in Settings.
          No updater and no install permission here: the Widget Updater app does the updating. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Network state: Android requires it for background jobs that wait for a network (the hub sync, the Toggl export).
+         A normal permission, granted at install without asking. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- The Widget Updater, which checks for new builds and installs them. -->
     <queries>

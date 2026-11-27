@@ -194,7 +194,11 @@ object HubSync {
                     notifyListeners()
                 }
             }
-            if (!HubJob.active) scheduleAgain(app)
+            try {
+                if (!HubJob.active) scheduleAgain(app)
+            } catch (e: Exception) {
+                HubPrefs.setError(app, e.message ?: e.javaClass.simpleName)
+            }
         }.start()
     }
 
@@ -468,19 +472,23 @@ object HubSync {
 
     /** Keeps the phone up to date with other devices' changes while the app isn't open. */
     fun schedulePoll(ctx: Context) {
-        val scheduler = ctx.getSystemService(JobScheduler::class.java) ?: return
-        if (!configured(ctx)) {
-            scheduler.cancel(HubJob.POLL_ID)
-            return
+        try {
+            val scheduler = ctx.getSystemService(JobScheduler::class.java) ?: return
+            if (!configured(ctx)) {
+                scheduler.cancel(HubJob.POLL_ID)
+                return
+            }
+            if (scheduler.getPendingJob(HubJob.POLL_ID) != null) return
+            scheduler.schedule(
+                JobInfo.Builder(HubJob.POLL_ID, ComponentName(ctx, HubJob::class.java))
+                    .setPeriodic(POLL_MS)
+                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                    .setPersisted(true)
+                    .build()
+            )
+        } catch (e: Exception) {
+            HubPrefs.setError(ctx, "Couldn't schedule the background sync: ${e.message ?: e.javaClass.simpleName}")
         }
-        if (scheduler.getPendingJob(HubJob.POLL_ID) != null) return
-        scheduler.schedule(
-            JobInfo.Builder(HubJob.POLL_ID, ComponentName(ctx, HubJob::class.java))
-                .setPeriodic(POLL_MS)
-                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                .setPersisted(true)
-                .build()
-        )
     }
 }
 
@@ -505,20 +513,26 @@ class HubJob : JobService() {
     override fun onStopJob(params: JobParameters): Boolean = true
 
     companion object {
-        const val JOB_ID = 4207
-        const val POLL_ID = 4208
+        // 4201-4207 are taken by the other jobs (CheckIn uses 4206 and 4207).
+        const val JOB_ID = 4211
+        const val POLL_ID = 4212
 
         @Volatile var active = false
 
         fun schedule(ctx: Context, delay: Long) {
-            val scheduler = ctx.getSystemService(JobScheduler::class.java) ?: return
-            scheduler.schedule(
-                JobInfo.Builder(JOB_ID, ComponentName(ctx, HubJob::class.java))
-                    .setMinimumLatency(delay)
-                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                    .setPersisted(true)
-                    .build()
-            )
+            try {
+                val scheduler = ctx.getSystemService(JobScheduler::class.java) ?: return
+                scheduler.schedule(
+                    JobInfo.Builder(JOB_ID, ComponentName(ctx, HubJob::class.java))
+                        .setMinimumLatency(delay)
+                        .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                        .setPersisted(true)
+                        .build()
+                )
+            } catch (e: Exception) {
+                // Never crash over scheduling: say so in Settings → Hub; opening the app still syncs.
+                HubPrefs.setError(ctx, "Couldn't schedule the background sync: ${e.message ?: e.javaClass.simpleName}")
+            }
         }
     }
 }
