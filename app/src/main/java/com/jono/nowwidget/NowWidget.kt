@@ -102,9 +102,10 @@ class NowWidget : AppWidgetProvider() {
     }
 }
 
-/** Puts the widget's timer and the notification back after a restart or an app update. */
+/** Puts the widget's timer and the notification back after a restart or an app update, and sets the evening recap again. */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
+        RecapNotice.schedule(ctx)
         WidgetRenderer.refresh(ctx)
     }
 }

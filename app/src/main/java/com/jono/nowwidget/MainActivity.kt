@@ -45,6 +45,7 @@ class MainActivity : Activity() {
     private lateinit var calendar: CalendarSection
     private lateinit var toggl: TogglSection
     private lateinit var hub: HubSection
+    private lateinit var recap: RecapSection
     private var periodDays = 1
     private val redraw: () -> Unit = { runOnUiThread { refresh() } }
     private val redrawObsidian: () -> Unit = { runOnUiThread { obsidian.refresh() } }
@@ -90,6 +91,7 @@ class MainActivity : Activity() {
         stats = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         col.addView(stats)
         col.addView(button("Timeline and edits") { startActivity(Intent(this, TimelineActivity::class.java)) })
+        col.addView(button("Recap: fill in today's gaps") { startActivity(Intent(this, RecapActivity::class.java)) })
 
         // --- Customize ---
         col.addView(heading("Customize"))
@@ -169,6 +171,10 @@ class MainActivity : Activity() {
             startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
         })
 
+        // --- Evening recap ---
+        recap = RecapSection(this)
+        col.addView(recap.view)
+
         // --- Data ---
         col.addView(heading("Your data"))
         col.addView(note("Your log stays on this phone, unless you turn on the hub sync or an export below: the hub, a Google Sheet of your own that your PC's Now widget shares; the calendar export, which Google's own sync uploads; or the Toggl export, which sends it to Toggl's servers. The hub and Toggl are the only things in the app that use the internet."))
@@ -241,6 +247,8 @@ class MainActivity : Activity() {
         TogglExport.onAppOpen(this)
         HubSync.onAppOpen(this)
         HubSync.schedulePoll(this)
+        RecapNotice.schedule(this)
+        recap.refresh()
         toggl.refresh()
         hub.refresh()
         // Access may have been changed in App info while away.

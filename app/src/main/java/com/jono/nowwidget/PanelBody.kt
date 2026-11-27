@@ -121,6 +121,14 @@ class PanelBody(
         grid.addView(a.chip("＋ Write", false) {
             a.startActivity(Intent(a, FreeWriteActivity::class.java))
         })
+        // The evening recap, small, on its own line so it's never mistaken for an activity.
+        val more = wrap()
+        more.addView(a.chip("Recap", false) {
+            a.startActivity(Intent(a, RecapActivity::class.java))
+        }.apply {
+            textSize = 12f
+            setPadding(a.dp(10), a.dp(4), a.dp(10), a.dp(4))
+        })
     }
 
     /** "Started 2:30p (45m ago) · Eat now 25m", then −5 −15 … ＋5, Undo, Set time…. */

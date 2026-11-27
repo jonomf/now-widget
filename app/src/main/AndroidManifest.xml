@@ -44,6 +44,8 @@
         </activity>
 
         <activity android:name=".TimelineActivity" android:exported="false" />
+        <!-- The evening recap: fill in the day's gaps. Opened from its notification, the app and the panel. -->
+        <activity android:name=".RecapActivity" android:exported="false" />
         <activity android:name=".ManageActivity" android:exported="false" />
         <!-- Daylio import. Kept alive on rotation so a long import isn't restarted. -->
         <activity
@@ -141,6 +143,11 @@
         <!-- Redraws the widget when the check-in flow (where / who / feeling) times out. -->
         <service
             android:name=".FlowJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <!-- The evening recap notification, once a day at the time you set (plain JobScheduler, no exact alarm). -->
+        <service
+            android:name=".RecapJob"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE" />
         <!-- App-icon long-press "Claude session" shortcut (ClaudeLink.syncShortcut) opens this. -->

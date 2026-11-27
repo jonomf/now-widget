@@ -38,6 +38,8 @@ import com.jono.nowwidget.core.Mentions
 import com.jono.nowwidget.core.Mood
 import com.jono.nowwidget.core.ObsidianDay
 import com.jono.nowwidget.core.PALETTE
+import com.jono.nowwidget.core.Recap
+import com.jono.nowwidget.core.RecapSettings
 import com.jono.nowwidget.core.Schema
 import com.jono.nowwidget.core.StartShift
 import com.jono.nowwidget.core.StoreSql
@@ -565,6 +567,24 @@ object Store {
 
     private const val NO_OTHER = -1L
 
+    /**
+     * What free-written [text] would be, without starting anything (the recap's ＋): an activity's
+     * name is that activity with no title; anything else is the words as a title, in the category
+     * [startTitled] would pick. Null for blank text.
+     */
+    fun freeWriteCategory(ctx: Context, text: String): Pair<Long, String?>? {
+        val t = FreeWrite.clean(text) ?: return null
+        val acts = allActs(ctx)
+        FreeWrite.exactActivity(t, acts)?.let { return it.id to null }
+        val cat = FreeWrite.category(t, acts, FreeWrite.lastActivityFor(t, titleUses(ctx)), Prefs.calRules(ctx), NO_OTHER)
+            .let { if (it == NO_OTHER) otherActivity(ctx) else it }
+        return cat to t
+    }
+
+    /** The ✏️ Other activity if there is one (never makes it, unlike [otherActivity]). */
+    fun otherActivityIfAny(ctx: Context): Long? =
+        allActs(ctx).firstOrNull { !it.archived && it.name.trim().equals(FreeWrite.OTHER_NAME, ignoreCase = true) }?.id
+
     /** How many entries have this title (any case). */
     fun titleCount(ctx: Context, title: String): Int = titleUses(ctx).count { FreeWrite.same(it.title, title) }
 
@@ -842,6 +862,9 @@ object Store {
     /** The context a new entry picks up: that of the last non-idle entry. */
     private fun lastContext(ctx: Context): Long? = contextQuery(ctx, StoreSql.LAST_CONTEXT, null)
 
+    /** The context of the last non-idle entry before [e] (what a new entry there would pick up). */
+    fun contextBeforeEntry(ctx: Context, e: Entry): Long? = contextBefore(ctx, e)
+
     private fun contextBefore(ctx: Context, e: Entry): Long? =
         contextQuery(ctx, StoreSql.CONTEXT_BEFORE, args(e.start, e.start, e.id))
 
@@ -974,13 +997,14 @@ object Store {
         startOf(ctx, entryId)?.let { dirtyAround(ctx, it) }
     }
 
-    fun addEntry(ctx: Context, activityId: Long, start: Long, links: Set<Long>, contextId: Long?, title: String? = null, extras: Set<Long> = emptySet()) {
+    /** Returns the new entry's id. */
+    fun addEntry(ctx: Context, activityId: Long, start: Long, links: Set<Long>, contextId: Long?, title: String? = null, extras: Set<Long> = emptySet()): Long =
         tx(ctx) {
             val id = insert(ctx, activityId, start, contextId, title)
             writeLinks(ctx, id, links)
             writeExtras(ctx, id, extras - activityId)
+            id
         }
-    }
 
     /** [title] null or blank makes it a plain entry of its activity again. Marks every export dirty, like any edit. */
     fun updateEntry(
@@ -1083,6 +1107,23 @@ object Store {
             while (c.moveToNext()) out.getOrPut(c.getLong(0)) { HashSet() }.add(c.getLong(1))
         }
         return out
+    }
+
+    /**
+     * The entries behind [spans] for [from, to): the one running at [from], then every one that starts
+     * before [to], oldest first, with links and extras. Idle ones are kept (the recap needs them).
+     */
+    fun dayEntries(ctx: Context, from: Long, to: Long): List<Entry> {
+        val rows = ArrayList<Entry>()
+        db(ctx).rawQuery(
+            "SELECT $ENTRY_COLS FROM entry " +
+                "WHERE start_ms >= (SELECT COALESCE(MAX(start_ms), 0) FROM entry WHERE start_ms <= ?) " +
+                "AND start_ms < ? ORDER BY start_ms, id",
+            args(from, to),
+        ).use { c ->
+            while (c.moveToNext()) rows.add(readEntry(c))
+        }
+        return withLinksAndExtras(ctx, rows)
     }
 
     /** Everything that happened in [from, to), oldest first. An entry runs until the next one starts. */
@@ -2065,6 +2106,25 @@ object Prefs {
         // commit: the next tap may come in a new process right after this one dies.
         if (v == null) p(ctx).edit().remove("flow_state").commit() else p(ctx).edit().putString("flow_state", v).commit()
     }
+
+    // --- Evening recap ---
+
+    fun recapOn(ctx: Context): Boolean = p(ctx).getBoolean("recap_on", true)
+    fun setRecapOn(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("recap_on", on).apply()
+    /** Minutes after midnight (default 9:30pm). */
+    fun recapTime(ctx: Context): Int = p(ctx).getInt("recap_time", Recap.DEFAULT_TIME)
+    fun setRecapTime(ctx: Context, v: Int) = p(ctx).edit().putInt("recap_time", v).apply()
+    fun recapSettings(ctx: Context): RecapSettings = RecapSettings(
+        minGapMinutes = p(ctx).getInt("recap_min_gap", 30),
+        countNoPlace = p(ctx).getBoolean("recap_no_place", true),
+    )
+    fun setRecapMinGap(ctx: Context, v: Int) = p(ctx).edit().putInt("recap_min_gap", v).apply()
+    fun setRecapNoPlace(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("recap_no_place", on).apply()
+    /** When the scheduled recap run is due, and when one last ran (ms), so a missed run catches up. */
+    fun recapDue(ctx: Context): Long = p(ctx).getLong("recap_due", 0L)
+    fun setRecapDue(ctx: Context, v: Long) = p(ctx).edit().putLong("recap_due", v).apply()
+    fun recapLastRun(ctx: Context): Long = p(ctx).getLong("recap_last_run", 0L)
+    fun setRecapLastRun(ctx: Context, v: Long) = p(ctx).edit().putLong("recap_last_run", v).commit().let { }
 
     // --- Obsidian vault ---
 
