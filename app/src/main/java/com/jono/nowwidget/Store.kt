@@ -169,6 +169,12 @@ object Store {
 
     private fun Cursor.longOrNull(i: Int): Long? = if (isNull(i)) null else getLong(i)
 
+    /**
+     * Runs [block] in one transaction (Store calls inside it nest), so a check and the writes it
+     * guards land together or not at all: an exception rolls everything back.
+     */
+    fun <T> inTx(ctx: Context, block: () -> T): T = tx(ctx) { block() }
+
     private fun <T> tx(ctx: Context, block: (SQLiteDatabase) -> T): T {
         val d = db(ctx)
         d.beginTransaction()
@@ -1241,6 +1247,9 @@ object Store {
             })
         }
     }
+
+    fun momentExists(ctx: Context, id: Long): Boolean =
+        db(ctx).rawQuery("SELECT 1 FROM moment WHERE id = ?", args(id)).use { it.moveToFirst() }
 
     fun deleteMoment(ctx: Context, id: Long) {
         tx(ctx) { d ->

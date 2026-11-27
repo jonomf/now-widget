@@ -86,6 +86,41 @@ class RecapTest {
     }
 
     @Test
+    fun onlyClosedGapsAndUnlabelledNotify() {
+        val now = t(21, 30)
+        // Just the open stretch until now (and no mood): shown, but no notification.
+        val open = build(listOf(e(work, t(9)), e(IDLE, t(18))), now = now)
+        assertEquals(1, open.gaps.size)
+        assertTrue(open.closedGaps.isEmpty())
+        assertFalse(open.notify)
+        // A closed gap does, and the text counts only it.
+        val closed = build(listOf(e(work, t(9)), e(IDLE, t(10)), e(work, t(11)), e(IDLE, t(18))), now = now)
+        assertTrue(closed.notify)
+        assertEquals("1 gap today · How was today?", Recap.summary(closed, closedOnly = true))
+        assertEquals("2 gaps today · How was today?", Recap.summary(closed))
+        // So does an unlabelled entry.
+        assertTrue(build(listOf(e(work, t(9), links = emptySet()), e(IDLE, t(12))), now = now, moments = listOf(mood(t(9)))).notify)
+    }
+
+    @Test
+    fun fillingBackToBackIdleEntriesRemovesTheInnerOnes() {
+        // 10:00 idle (head), 10:20 idle, 10:40 idle, until 11:00.
+        val r = build(listOf(e(work, t(9)), e(IDLE, t(10)), e(IDLE, t(10, 20)), e(IDLE, t(10, 40)), e(work, t(11)), e(IDLE, t(12))))
+        val g = r.gaps.single()
+        assertEquals(2L, g.headIdle)
+        assertEquals(listOf(RecapRow.IdleRef(3, t(10, 20)), RecapRow.IdleRef(4, t(10, 40))), g.inner)
+        assertEquals(FillPlan(2L, null, null, listOf(3L, 4L)), Recap.plan(g, FillPart.WHOLE))
+        // First half (to 10:30): the 10:20 one goes; idle again from 10:30.
+        assertEquals(FillPlan(2L, null, t(10, 30), listOf(3L)), Recap.plan(g, FillPart.FIRST_HALF))
+        // Last half (from 10:30): the 10:40 one goes.
+        assertEquals(FillPlan(null, t(10, 30), null, listOf(4L)), Recap.plan(g, FillPart.LAST_HALF))
+        // An idle entry right at the middle goes with the last half.
+        val atMid = RecapRow.Gap(t(10), t(11), 2L, false, listOf(RecapRow.IdleRef(3, t(10, 30))))
+        assertEquals(listOf(3L), Recap.plan(atMid, FillPart.LAST_HALF).delete)
+        assertEquals(emptyList<Long>(), Recap.plan(atMid, FillPart.FIRST_HALF).delete)
+    }
+
+    @Test
     fun backToBackIdleEntriesAreOneGap() {
         val r = build(listOf(e(work, t(9)), e(IDLE, t(10)), e(IDLE, t(10, 20)), e(work, t(10, 40))))
         val g = r.gaps.single()
@@ -162,7 +197,9 @@ class RecapTest {
         assertTrue(r.moodMissing)
         assertEquals(t(17), r.moodAt)
         assertFalse(build(entries, now = t(21), moments = listOf(mood(t(12)))).moodMissing)
-        // A note without a mood doesn't count.
+        // A feeling with words but no face counts as the day's feeling.
+        assertFalse(build(entries, now = t(21), moments = listOf(Moment(1, t(12), MomentKind.FEELING, "", "", null, null, listOf(4L)))).moodMissing)
+        // A note doesn't.
         assertTrue(build(entries, now = t(21), moments = listOf(Moment(1, t(12), MomentKind.NOTE, "", "hi", null, null))).moodMissing)
         // Running now: now.
         assertEquals(t(15), build(listOf(e(work, t(9))), now = t(15)).moodAt)
@@ -197,7 +234,8 @@ class RecapTest {
         assertEquals("1 gap today", Recap.summary(one))
         val moodOnly = build(listOf(e(work, t(9)), e(IDLE, t(12))))
         assertEquals("How was today?", Recap.summary(moodOnly))
-        assertTrue(moodOnly.notify)
+        // A missing mood alone doesn't notify.
+        assertFalse(moodOnly.notify)
         assertEquals("1 gap", Recap.summary(one, suffix = ""))
     }
 
@@ -271,6 +309,8 @@ class RecapTest {
         // After a run or a new time: from now.
         assertEquals(t(45, 30), Recap.next(t(21, 30) + 5_000L, time, due, lastRun = t(21, 30), pending = false, fresh = true, tz = la)!!.runAt)
         assertEquals(t(22), Recap.next(t(15), 22 * 60, due, lastRun = 0L, pending = true, fresh = true, tz = la)!!.runAt)
+        // The run is going on right now (it just set lastRun): leave it.
+        assertNull(Recap.next(t(21, 31) + 20_000L, time, due, lastRun = t(21, 31), pending = true, fresh = false, tz = la))
         // First ever.
         assertEquals(due, Recap.next(t(15), time, 0L, 0L, pending = false, fresh = false, tz = la)!!.runAt)
     }

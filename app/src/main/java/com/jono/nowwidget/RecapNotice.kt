@@ -49,7 +49,8 @@ object RecapNotice {
     enum class Outcome { SHOWN, NOTHING_TO_FIX, BLOCKED }
 
     /**
-     * Shows today's recap notification when there's something to fix, else takes any old one away.
+     * Shows today's recap notification when there's a closed gap or an unlabelled entry ([DayRecap.notify];
+     * the stretch running until now and a missing mood don't count alone), else takes any old one away.
      * Call off the main thread.
      */
     fun check(ctx: Context): Outcome {
@@ -67,8 +68,10 @@ object RecapNotice {
             Intent(ctx, RecapActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        // Counts only: this text is fine on the lock screen.
-        val text = Recap.summary(r)
+        // Counts only: this text is fine on the lock screen. Closed gaps only, as for the trigger.
+        val text = Recap.summary(r, closedOnly = true)
+        // Gone when the diary day ends (4am): it's about a day that's over by then.
+        val untilDayEnd = maxOf(60_000L, DiaryDay.add(DiaryDay.start(now), 1) - now)
         val n = Notification.Builder(ctx, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle("Evening recap")
@@ -77,6 +80,7 @@ object RecapNotice {
             .setOnlyAlertOnce(true)
             .setAutoCancel(true)
             .setContentIntent(open)
+            .setTimeoutAfter(untilDayEnd)
             .build()
         // One id: a new day's recap replaces the last one.
         nm.notify(ID, n)
@@ -87,7 +91,8 @@ object RecapNotice {
         ctx.getSystemService(NotificationManager::class.java)?.cancel(ID)
     }
 
-    private fun ensureChannel(nm: NotificationManager) {
+    /** Makes the channel, so "Evening recap" is in Android's settings from the start. */
+    fun ensureChannel(nm: NotificationManager) {
         if (nm.getNotificationChannel(CHANNEL) != null) return
         // Silent by default; he can make it audible in Android's settings for this channel.
         val c = NotificationChannel(CHANNEL, "Evening recap", NotificationManager.IMPORTANCE_LOW)
@@ -103,6 +108,7 @@ object RecapNotice {
      */
     fun schedule(ctx: Context, fresh: Boolean = false) {
         try {
+            ctx.getSystemService(NotificationManager::class.java)?.let { ensureChannel(it) }
             val scheduler = ctx.getSystemService(JobScheduler::class.java) ?: return
             if (!Prefs.recapOn(ctx)) {
                 scheduler.cancel(JOB_ID)
@@ -138,9 +144,10 @@ class RecapJob : JobService() {
             } catch (e: Throwable) {
                 // Nothing shown tonight; tomorrow's run is still set below.
             }
-            // Finish first: scheduling this job's id again while it runs would stop it.
-            jobFinished(params, false)
+            // Tomorrow's run is set before this one finishes, so it's never left unset. (Android stops
+            // this run when its id is scheduled again; its work is done by then.)
             RecapNotice.schedule(app, fresh = true)
+            jobFinished(params, false)
         }.start()
         return true
     }

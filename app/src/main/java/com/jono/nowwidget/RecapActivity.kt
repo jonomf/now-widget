@@ -92,11 +92,17 @@ class RecapActivity : Activity() {
         val contextId: Long?,
     )
 
+    /**
+     * One step of undoing a save. [wrote] is the entry as the save left it: if it isn't like that any
+     * more (the hub or the widget changed it since), the op is skipped rather than undoing over it.
+     */
     sealed class UndoOp {
-        /** Put an entry back as it was. */
-        data class Restore(val e: Entry) : UndoOp()
+        /** Put an entry back as it was ([old]). */
+        data class Restore(val old: Entry, val wrote: Entry) : UndoOp()
         /** Delete an entry the recap made. */
-        data class Remove(val entryId: Long) : UndoOp()
+        data class Remove(val wrote: Entry) : UndoOp()
+        /** Add back an idle entry the fill removed (it gets a new id). */
+        data class ReAdd(val old: Entry) : UndoOp()
         data class RemoveMoment(val momentId: Long) : UndoOp()
     }
 
@@ -517,30 +523,42 @@ class RecapActivity : Activity() {
      * an idle entry closes it where the fill ends, so nothing outside it changes. Checks first that the
      * gap is still as it was drawn.
      */
-    private fun fillGap(gap: RecapRow.Gap, part: FillPart, act: Long, title: String?, links: Set<Long>, contextId: Long?): UndoStep {
-        val inside = Store.entriesStarting(this, gap.from, gap.to)
-        if (inside.any { it.activityId != IDLE }) throw Stale()
-        val plan = Recap.plan(gap, part)
-        val ops = ArrayList<UndoOp>()
-        val changeId = plan.changeIdle
-        if (changeId != null) {
-            val old = Store.entryById(this, changeId) ?: throw Stale()
-            if (old.activityId != IDLE || old.start != gap.from) throw Stale()
-            Store.updateEntry(this, old.id, act, old.start, links, contextId, title, emptySet())
-            ops.add(UndoOp.Restore(old))
-        } else if (inside.any { it.start == gap.from } && plan.insertAt == gap.from) {
-            throw Stale()
-        }
-        plan.insertAt?.let { at -> ops.add(UndoOp.Remove(Store.addEntry(this, act, at, links, contextId, title))) }
-        plan.idleAt?.let { at ->
-            if (Store.entriesStarting(this, at, at + 1).isEmpty()) {
-                ops.add(UndoOp.Remove(Store.addEntry(this, IDLE, at, emptySet(), null)))
+    private fun fillGap(gap: RecapRow.Gap, part: FillPart, act: Long, title: String?, links: Set<Long>, contextId: Long?): UndoStep =
+        // One transaction: the check that the gap is as drawn, and every write. A failure part way rolls it all back.
+        Store.inTx(this) {
+            val inside = Store.entriesStarting(this, gap.from, gap.to)
+            if (inside.any { it.activityId != IDLE }) throw Stale()
+            val plan = Recap.plan(gap, part)
+            val ops = ArrayList<UndoOp>()
+            val changeId = plan.changeIdle
+            if (changeId != null) {
+                val old = Store.entryById(this, changeId) ?: throw Stale()
+                if (old.activityId != IDLE || old.start != gap.from) throw Stale()
+                Store.updateEntry(this, old.id, act, old.start, links, contextId, title, emptySet())
+                ops.add(UndoOp.Restore(old, Store.entryById(this, old.id) ?: throw Stale()))
+            } else if (inside.any { it.start == gap.from } && plan.insertAt == gap.from) {
+                throw Stale()
             }
+            // The gap's other idle entries in the filled part: they'd cut the fill short.
+            plan.delete.forEach { id ->
+                val old = inside.firstOrNull { it.id == id } ?: throw Stale()
+                Store.deleteEntry(this, id)
+                ops.add(UndoOp.ReAdd(old))
+            }
+            plan.insertAt?.let { at ->
+                val id = Store.addEntry(this, act, at, links, contextId, title)
+                ops.add(UndoOp.Remove(Store.entryById(this, id) ?: throw Stale()))
+            }
+            plan.idleAt?.let { at ->
+                if (Store.entriesStarting(this, at, at + 1).isEmpty()) {
+                    val id = Store.addEntry(this, IDLE, at, emptySet(), null)
+                    ops.add(UndoOp.Remove(Store.entryById(this, id) ?: throw Stale()))
+                }
+            }
+            val end = plan.idleAt ?: gap.to
+            val from = plan.insertAt ?: gap.from
+            UndoStep("Filled " + range(from, end), ops)
         }
-        val end = plan.idleAt ?: gap.to
-        val from = plan.insertAt ?: gap.from
-        return UndoStep("Filled " + range(from, end), ops)
-    }
 
     private fun unlabelledFiller(row: RecapRow.Unlabelled, d: Data): View {
         val b = box()
@@ -574,17 +592,22 @@ class RecapActivity : Activity() {
         return b
     }
 
-    /** Gives an unlabelled entry its category or words, and/or its place. */
-    private fun applyLabel(row: RecapRow.Unlabelled, act: Long?, title: String?, place: Long?, placeIds: Set<Long>): UndoStep? {
-        val old = Store.entryById(this, row.entry.id) ?: throw Stale()
-        if (old.start != row.entry.start || old.activityId != row.entry.activityId) throw Stale()
-        val links = if (place != null) old.links.filter { it !in placeIds }.toSet() + place else old.links
-        val newAct = act ?: old.activityId
-        val newTitle = if (act != null) title else old.title
-        if (newAct == old.activityId && newTitle == old.title && links == old.links) return null
-        Store.updateEntry(this, old.id, newAct, old.start, links, old.contextId, newTitle, old.extras)
-        return UndoStep("Saved " + range(row.from, row.to), listOf(UndoOp.Restore(old)))
-    }
+    /** Gives an unlabelled entry its category or words, and/or its place (one transaction with its check). */
+    private fun applyLabel(row: RecapRow.Unlabelled, act: Long?, title: String?, place: Long?, placeIds: Set<Long>): UndoStep? =
+        Store.inTx(this) {
+            val old = Store.entryById(this, row.entry.id) ?: throw Stale()
+            if (old.start != row.entry.start || old.activityId != row.entry.activityId) throw Stale()
+            val links = if (place != null) old.links.filter { it !in placeIds }.toSet() + place else old.links
+            val newAct = act ?: old.activityId
+            val newTitle = if (act != null) title else old.title
+            if (newAct == old.activityId && newTitle == old.title && links == old.links) {
+                null
+            } else {
+                Store.updateEntry(this, old.id, newAct, old.start, links, old.contextId, newTitle, old.extras)
+                val wrote = Store.entryById(this, old.id) ?: throw Stale()
+                UndoStep("Saved " + range(row.from, row.to), listOf(UndoOp.Restore(old, wrote)))
+            }
+        }
 
     // --- How was today? ---
 
@@ -605,11 +628,13 @@ class RecapActivity : Activity() {
             faces.addView(chip(moodFace(m), false) {
                 val text = noteField.text.toString().trim()
                 save {
-                    // Only if the day still has no mood (the widget may have added one meanwhile).
-                    val r = RecapNotice.recap(this, forDay)
-                    if (!r.moodMissing) throw Stale()
-                    val id = Store.addMoment(this, at, "", text, m.id, emptyList(), null)
-                    UndoStep("Saved " + moodFace(m) + " for the day", listOf(UndoOp.RemoveMoment(id)))
+                    Store.inTx(this) {
+                        // Only if the day still has no feeling (the widget may have added one meanwhile).
+                        val r = RecapNotice.recap(this, forDay)
+                        if (!r.moodMissing) throw Stale()
+                        val id = Store.addMoment(this, at, "", text, m.id, emptyList(), null)
+                        UndoStep("Saved " + moodFace(m) + " for the day", listOf(UndoOp.RemoveMoment(id)))
+                    }
                 }
                 noteField.setText("")
             }.apply {
@@ -642,12 +667,30 @@ class RecapActivity : Activity() {
         clearUndo()
         undoBar.removeCallbacks(hideUndo)
         save {
-            step.ops.asReversed().forEach { op ->
-                when (op) {
-                    is UndoOp.Remove -> Store.deleteEntry(this, op.entryId)
-                    is UndoOp.Restore -> Store.updateEntry(this, op.e.id, op.e.activityId, op.e.start, op.e.links, op.e.contextId, op.e.title, op.e.extras)
-                    is UndoOp.RemoveMoment -> Store.deleteMoment(this, op.momentId)
+            var skipped = 0
+            // One transaction; each op only if what it undoes is still as the save left it.
+            Store.inTx(this) {
+                step.ops.asReversed().forEach { op ->
+                    val done = when (op) {
+                        is UndoOp.Remove -> (Store.entryById(this, op.wrote.id) == op.wrote).also { same ->
+                            if (same) Store.deleteEntry(this, op.wrote.id)
+                        }
+                        is UndoOp.Restore -> (Store.entryById(this, op.old.id) == op.wrote).also { same ->
+                            if (same) Store.updateEntry(this, op.old.id, op.old.activityId, op.old.start, op.old.links, op.old.contextId, op.old.title, op.old.extras)
+                        }
+                        // Back in place unless something else starts there now.
+                        is UndoOp.ReAdd -> Store.entriesStarting(this, op.old.start, op.old.start + 1).isEmpty().also { free ->
+                            if (free) Store.addEntry(this, op.old.activityId, op.old.start, op.old.links, op.old.contextId, op.old.title, op.old.extras)
+                        }
+                        is UndoOp.RemoveMoment -> Store.momentExists(this, op.momentId).also { there ->
+                            if (there) Store.deleteMoment(this, op.momentId)
+                        }
+                    }
+                    if (!done) skipped++
                 }
+            }
+            if (skipped > 0) runOnUiThread {
+                Toast.makeText(this, "Part of it had changed since, so that part was left as it is.", Toast.LENGTH_LONG).show()
             }
             null
         }

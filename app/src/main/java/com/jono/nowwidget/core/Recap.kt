@@ -22,8 +22,18 @@ sealed class RecapRow {
     /**
      * Nothing logged (idle) for [from]–[to]. [headIdle]: the idle entry that starts exactly at [from]
      * (filling the gap changes it), if any. [open]: it runs until now (the latest entry is idle).
+     * [inner]: the other idle entries that start inside it (back-to-back idle entries), oldest first.
      */
-    data class Gap(override val from: Long, override val to: Long, val headIdle: Long?, val open: Boolean) : RecapRow()
+    data class Gap(
+        override val from: Long,
+        override val to: Long,
+        val headIdle: Long?,
+        val open: Boolean,
+        val inner: List<IdleRef> = emptyList(),
+    ) : RecapRow()
+
+    /** An idle entry by id and start. */
+    data class IdleRef(val id: Long, val start: Long)
 
     /** Logged, but on ✏️ Other with no words ([noTitle]) and/or with no place ([noPlace]). */
     data class Unlabelled(
@@ -40,7 +50,7 @@ data class DayRecap(
     val dayStart: Long,
     val dayEnd: Long,
     val rows: List<RecapRow>,
-    /** No feeling with a mood in the day. */
+    /** No feeling moment in the day at all (the "How was today?" row). */
     val moodMissing: Boolean,
     /** When a mood saved from the recap goes: the end of the last thing logged, or now if earlier. */
     val moodAt: Long,
@@ -49,9 +59,14 @@ data class DayRecap(
 ) {
     val gaps: List<RecapRow.Gap> get() = rows.filterIsInstance<RecapRow.Gap>()
     val unlabelled: List<RecapRow.Unlabelled> get() = rows.filterIsInstance<RecapRow.Unlabelled>()
+    /** Gaps that have ended (between entries), not the stretch running until now. */
+    val closedGaps: List<RecapRow.Gap> get() = gaps.filter { !it.open }
     val nothingToFix: Boolean get() = gaps.isEmpty() && unlabelled.isEmpty() && !moodMissing
-    /** The evening notification shows only when this is true: something was logged and something needs fixing. */
-    val notify: Boolean get() = logged && !nothingToFix
+    /**
+     * The evening notification shows only when this is true: a closed gap or an unlabelled entry.
+     * The open stretch until now and a missing mood don't count on their own.
+     */
+    val notify: Boolean get() = logged && (closedGaps.isNotEmpty() || unlabelled.isNotEmpty())
 }
 
 /** Which part of a gap a fill covers. */
@@ -62,9 +77,10 @@ enum class FillPart { WHOLE, FIRST_HALF, LAST_HALF }
  * - [changeIdle]: this idle entry becomes the chosen activity (it already starts at the gap's start);
  * - [insertAt]: a new entry of the chosen activity starts here;
  * - [idleAt]: a new idle entry starts here, so the rest of the gap stays unlogged (and a gap that ran
- *   until now doesn't turn into what's on now).
+ *   until now doesn't turn into what's on now);
+ * - [delete]: the gap's other idle entries inside the filled part, which would otherwise cut it short.
  */
-data class FillPlan(val changeIdle: Long?, val insertAt: Long?, val idleAt: Long?)
+data class FillPlan(val changeIdle: Long?, val insertAt: Long?, val idleAt: Long?, val delete: List<Long> = emptyList())
 
 /**
  * The evening recap's rules: gaps (stretches with nothing logged), unlabelled entries and a missing
@@ -117,7 +133,7 @@ object Recap {
             if (b > a) segs.add(Seg(e, a, b, i == entries.lastIndex))
         }
         val busy = segs.filter { !it.idle }
-        val hasMood = moments.any { it.moodId != null && it.ts >= dayStart && it.ts < dayEnd }
+        val hasMood = moments.any { it.kind == MomentKind.FEELING && it.ts >= dayStart && it.ts < dayEnd }
         val moodAt = minOf(busy.lastOrNull()?.to ?: now, now, dayEnd - 1).coerceAtLeast(dayStart)
         if (busy.isEmpty()) return DayRecap(dayStart, dayEnd, emptyList(), !hasMood, moodAt, logged = false)
 
@@ -152,7 +168,8 @@ object Recap {
             if (b - a >= minGap && !sleepLike(a, b, tz)) {
                 val head = run.firstOrNull { it.entry.start == a }?.entry?.id
                 val open = today && run.last().last && b == limit
-                rows.add(RecapRow.Gap(a, b, head, open))
+                val inner = run.filter { it.entry.start > a && it.entry.start < b }.map { RecapRow.IdleRef(it.entry.id, it.entry.start) }
+                rows.add(RecapRow.Gap(a, b, head, open, inner))
             }
             i = j + 1
         }
@@ -193,14 +210,20 @@ object Recap {
     fun plan(gap: RecapRow.Gap, part: FillPart): FillPlan {
         val first = gap.headIdle
         val p = if (part != FillPart.WHOLE && !canSplit(gap)) FillPart.WHOLE else part
+        val mid = middle(gap)
+        // The filled span, and the gap's other idle entries in it (they'd cut the fill short).
+        fun inside(from: Long, to: Long, withFrom: Boolean) =
+            gap.inner.filter { (it.start > from || (withFrom && it.start == from)) && it.start < to }.map { it.id }
+        val end = if (gap.open) gap.to else null
         return when (p) {
             FillPart.WHOLE ->
-                if (first != null) FillPlan(first, null, if (gap.open) gap.to else null)
-                else FillPlan(null, gap.from, if (gap.open) gap.to else null)
+                if (first != null) FillPlan(first, null, end, inside(gap.from, gap.to, false))
+                else FillPlan(null, gap.from, end, inside(gap.from, gap.to, true))
             FillPart.FIRST_HALF ->
-                if (first != null) FillPlan(first, null, middle(gap))
-                else FillPlan(null, gap.from, middle(gap))
-            FillPart.LAST_HALF -> FillPlan(null, middle(gap), if (gap.open) gap.to else null)
+                if (first != null) FillPlan(first, null, mid, inside(gap.from, mid, false))
+                else FillPlan(null, gap.from, mid, inside(gap.from, mid, true))
+            // The new entry starts at the middle; an idle entry starting right there would sit under it, so it goes too.
+            FillPart.LAST_HALF -> FillPlan(null, mid, end, inside(mid, gap.to, true))
         }
     }
 
@@ -209,9 +232,9 @@ object Recap {
      * ("3 gaps and 1 unlabelled today", then "· How was today?" without a mood). Blank when there's
      * nothing to fix.
      */
-    fun summary(r: DayRecap, suffix: String = " today"): String {
+    fun summary(r: DayRecap, suffix: String = " today", closedOnly: Boolean = false): String {
         val parts = ArrayList<String>()
-        val g = r.gaps.size
+        val g = if (closedOnly) r.closedGaps.size else r.gaps.size
         val u = r.unlabelled.size
         if (g > 0) parts.add(if (g == 1) "1 gap" else "$g gaps")
         if (u > 0) parts.add("$u unlabelled")
@@ -247,7 +270,12 @@ object Recap {
      * Otherwise (app open, boot, update) keep a run that's still [pending] for a later [due], and run
      * one that was missed by under [CATCH_UP_MS] right away. Null: keep what's set.
      */
-    fun next(now: Long, minuteOfDay: Int, due: Long, lastRun: Long, pending: Boolean, fresh: Boolean, tz: TimeZone = TimeZone.getDefault()): Next? {
+    fun next(
+        now: Long, minuteOfDay: Int, due: Long, lastRun: Long, pending: Boolean, fresh: Boolean,
+        tz: TimeZone = TimeZone.getDefault(), slackMs: Long = 15L * MIN_MS,
+    ): Next? {
+        // The run for [due] is going on right now (it set lastRun moments ago): leave it be.
+        if (!fresh && due > 0L && lastRun >= due - slackMs && now - lastRun < MIN_MS) return null
         if (!fresh && due > 0L) {
             if (due <= now && lastRun < due && now - due < CATCH_UP_MS) return Next(now, due)
             if (due > now && pending) return null

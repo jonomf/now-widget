@@ -20,7 +20,7 @@ class RecapSection(private val a: Activity) {
     init {
         view.addView(a.heading("Evening recap"))
         view.addView(a.note(
-            "Once a day, a silent notification when today has gaps (nothing logged), entries to label or no mood yet. " +
+            "Once a day, a silent notification when today has gaps (nothing logged between entries) or entries to label. " +
                 "Tap it to fill them in. It shows counts only, never what you did or who with. " +
                 "To make it buzz, change the \"Evening recap\" notification in Android's settings."
         ))
@@ -84,7 +84,7 @@ class RecapSection(private val a: Activity) {
             a.runOnUiThread {
                 val msg = when (outcome) {
                     RecapNotice.Outcome.SHOWN -> "Recap shown"
-                    RecapNotice.Outcome.NOTHING_TO_FIX -> "Nothing to fix today"
+                    RecapNotice.Outcome.NOTHING_TO_FIX -> "No gaps or unlabelled entries today, so no notification"
                     RecapNotice.Outcome.BLOCKED -> "Notifications are off for Now. Turn them on in App info."
                     null -> "Couldn't make the recap"
                 }
